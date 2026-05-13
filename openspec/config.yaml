@@ -4,17 +4,22 @@ schema: spec-driven
 # This is shown to AI when creating artifacts.
 # Add your tech stack, conventions, style guides, domain knowledge, etc.
 # Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Project: de-bedrijfskompas pipeline
+  Stack: Python
+
+  I use conventional commits
+
+  Final pipeline output: Produce a dataset that can be used to build the static front-end.
+  Purpose: Company-first discovery pipeline for employers: scrape, extract, and de-marketing-ify company website data so job seekers can evaluate companies on substance rather than vacancies. See CONSTITUTION.md for full principles
+  Test-set: Companies from the test set (test-set/companies.json) can be used to test if wanted.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
 # Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - State what stage(s) this change affects and why
+  specs:
+    - Define input JSON shape and output JSON shape explicitly
+    - List edge cases the stage must handle, and which it explicitly does not
