@@ -21,5 +21,6 @@ rules:
   proposal:
     - State what stage(s) this change affects and why
   specs:
-    - Define input JSON shape and output JSON shape explicitly
+    - Define input and output shape explicitly, in whatever format the stage produces (JSON for most stages, markdown for content stages)
     - List edge cases the stage must handle, and which it explicitly does not
+    - Write specs timelessly — describe the current state, not the change. MODIFIED requirements replace the canonical spec verbatim on archive, so avoid "subsumes/replaces/was formerly/remains/no longer" framing in requirement bodies and scenarios. History belongs in the proposal and git log, not the spec.
