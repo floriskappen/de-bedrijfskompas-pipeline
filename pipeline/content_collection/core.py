@@ -6,10 +6,11 @@ import json
 import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from pipeline.website_resolution import company_id
 
-from . import crawl, extract, fetch
+from . import crawl, extract, fetch, sitemap
 
 DEFAULT_INTER_PAGE_SLEEP = 1.0
 
@@ -61,7 +62,30 @@ def process(
     footer_text = extract.extract_footer_text(homepage_html)
 
     links = crawl.extract_internal_links(homepage_url, homepage_html)
-    selected, collisions = crawl.select_urls(homepage_url, links)
+
+    sitemap_url = sitemap.discover_sitemap_url(homepage_url, fetch=fetch.get)
+    sitemap_urls_raw = sitemap.harvest_urls(sitemap_url, fetch=fetch.get)
+    base_domain = crawl._registered_domain(homepage_url)
+    sitemap_filtered: list[str] = []
+    for url in sitemap_urls_raw:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if crawl._registered_domain(url) != base_domain:
+            continue
+        canon = urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
+        if canon == homepage_url:
+            continue
+        if canon in links or canon in sitemap_filtered:
+            continue
+        sitemap_filtered.append(canon)
+
+    sitemap_consulted = True
+    sitemap_used_url = sitemap_url if sitemap_urls_raw else None
+    sitemap_urls_found = len(sitemap_urls_raw)
+
+    candidate_links = links + sitemap_filtered
+    selected, collisions = crawl.select_urls(homepage_url, candidate_links)
     for url, slug in collisions:
         urls_attempted.append(
             {
@@ -118,6 +142,9 @@ def process(
     meta["urls_attempted"] = urls_attempted
     meta["footer_text"] = footer_text
     meta["pages"] = pages_meta
+    meta["sitemap_consulted"] = sitemap_consulted
+    meta["sitemap_url"] = sitemap_used_url
+    meta["sitemap_urls_found"] = sitemap_urls_found
 
     if write:
         _write_company(meta, pages=pages_written, out_dir=out_dir)
@@ -157,6 +184,9 @@ def _meta_skeleton(record: dict, *, status: str) -> dict:
     out["urls_attempted"] = []
     out["footer_text"] = None
     out["pages"] = {}
+    out["sitemap_consulted"] = False
+    out["sitemap_url"] = None
+    out["sitemap_urls_found"] = 0
     return out
 
 

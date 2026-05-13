@@ -40,6 +40,13 @@ Per-page errors (a single 404 inside an otherwise-healthy crawl) land in `urls_a
 
 ## Page selection
 
+URLs are gathered from two sources and then selected via tier matching:
+
+1. **Homepage links** — `<a href>` from the homepage HTML, filtered to the same registered domain.
+2. **Sitemap** — `/robots.txt` is checked for a `Sitemap:` directive; if none, `/sitemap.xml` is tried as a fallback. WordPress sites that serve `/wp-sitemap.xml` are correctly discovered via robots.txt. A sitemap-index is followed for up to 3 nested children. Bogus sitemap responses (HTML on `/sitemap.xml`, common on SPAs) are silently ignored.
+
+`_meta.json` records `sitemap_consulted`, `sitemap_url`, and `sitemap_urls_found` so you can evaluate how often the fallback fires.
+
 URLs are matched against three tiers of path patterns (English + Dutch) in `crawl.py`:
 
 - **Tier 1**: identity, mission, vision, services, approach, expertise, sectors.

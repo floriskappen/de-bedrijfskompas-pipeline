@@ -389,6 +389,196 @@ def test_process_slug_collision_recorded(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# Sitemap fallback
+# ---------------------------------------------------------------------------
+
+SITEMAP_NS = ' xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+
+
+def _urlset(urls: list[str], *, namespaced: bool = True) -> str:
+    ns = SITEMAP_NS if namespaced else ""
+    locs = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
+    return f'<?xml version="1.0" encoding="UTF-8"?><urlset{ns}>{locs}</urlset>'
+
+
+def _sitemapindex(child_urls: list[str], *, namespaced: bool = True) -> str:
+    ns = SITEMAP_NS if namespaced else ""
+    locs = "".join(f"<sitemap><loc>{u}</loc></sitemap>" for u in child_urls)
+    return f'<?xml version="1.0" encoding="UTF-8"?><sitemapindex{ns}>{locs}</sitemapindex>'
+
+
+def test_sitemap_surfaces_unlinked_durable_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    homepage = _page("Home", extra_links='<a href="/login">Login</a>')
+    pages = {
+        f"{base}/": homepage,
+        f"{base}/pricing": _page("Pricing"),
+        f"{base}/sitemap.xml": _urlset([f"{base}/", f"{base}/pricing"]),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=False)
+    written = [a["slug"] for a in meta["urls_attempted"] if a["status"] == "written"]
+    assert "pricing" in written
+
+
+def test_sitemap_discovered_via_robots_txt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    fetched: list[str] = []
+
+    def _fetch(url: str, *, timeout: float = 15.0) -> FetchResult:
+        fetched.append(url)
+        canned = {
+            f"{base}/": _page("Home", extra_links='<a href="/about">A</a>'),
+            f"{base}/about": _page("About"),
+            f"{base}/robots.txt": FetchResult(
+                url=url,
+                html=f"User-agent: *\nDisallow: /admin\nSitemap: {base}/wp-sitemap.xml\n",
+                error=None,
+                error_kind=None,
+            ),
+            f"{base}/wp-sitemap.xml": _urlset([f"{base}/contact"]),
+            f"{base}/contact": _page("Contact"),
+        }
+        v = canned.get(url)
+        if isinstance(v, FetchResult):
+            return v
+        if v is None:
+            return FetchResult(url=url, html=None, error="HTTP 404", error_kind="http_404")
+        return FetchResult(url=url, html=v, error=None, error_kind=None)
+
+    monkeypatch.setattr(core_module.fetch, "get", _fetch)
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=False)
+
+    assert f"{base}/wp-sitemap.xml" in fetched
+    assert f"{base}/sitemap.xml" not in fetched
+    assert meta["sitemap_url"] == f"{base}/wp-sitemap.xml"
+
+
+def test_sitemap_index_nesting_capped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    children = [f"{base}/sm-{i}.xml" for i in range(5)]
+    fetched_children: list[str] = []
+
+    def _fetch(url: str, *, timeout: float = 15.0) -> FetchResult:
+        if url == f"{base}/":
+            return FetchResult(url=url, html=_page("Home"), error=None, error_kind=None)
+        if url == f"{base}/sitemap.xml":
+            return FetchResult(url=url, html=_sitemapindex(children), error=None, error_kind=None)
+        if url in children:
+            fetched_children.append(url)
+            return FetchResult(url=url, html=_urlset([f"{base}/page-{url[-5]}"]), error=None, error_kind=None)
+        if url == f"{base}/robots.txt":
+            return FetchResult(url=url, html=None, error="HTTP 404", error_kind="http_404")
+        return FetchResult(url=url, html=None, error="HTTP 404", error_kind="http_404")
+
+    monkeypatch.setattr(core_module.fetch, "get", _fetch)
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    core_module.process(record, out_dir=tmp_path, write=False)
+    assert fetched_children == children[:3]
+
+
+def test_malformed_sitemap_silently_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS),
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+        f"{base}/sitemap.xml": "<!DOCTYPE html><html><body>oops</body></html>",
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=False)
+    assert meta["status"] == "ok"
+    assert meta["sitemap_url"] is None
+    assert meta["sitemap_urls_found"] == 0
+    assert meta["sitemap_consulted"] is True
+
+
+def test_sitemap_metadata_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS),
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+        f"{base}/sitemap.xml": _urlset([f"{base}/about", f"{base}/team", f"{base}/contact", f"{base}/pricing"]),
+        f"{base}/pricing": _page("Pricing"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=False)
+    assert meta["sitemap_consulted"] is True
+    assert meta["sitemap_url"] == f"{base}/sitemap.xml"
+    assert meta["sitemap_urls_found"] == 4
+
+
+def test_upstream_failed_has_new_sitemap_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(core_module.fetch, "get", lambda *a, **k: pytest.fail("no fetch expected"))
+    record = {"name": "Foo B.V.", "website": None, "status": "failed"}
+    meta = core_module.process(record, out_dir=tmp_path, write=True)
+    assert meta["sitemap_consulted"] is False
+    assert meta["sitemap_url"] is None
+    assert meta["sitemap_urls_found"] == 0
+
+
+def test_robots_txt_disallow_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+
+    def _fetch(url: str, *, timeout: float = 15.0) -> FetchResult:
+        canned = {
+            f"{base}/": _page("Home", extra_links='<a href="/pricing">P</a>'),
+            f"{base}/pricing": _page("Pricing"),
+            f"{base}/robots.txt": FetchResult(
+                url=url,
+                html=f"User-agent: *\nDisallow: /pricing\nSitemap: {base}/sitemap.xml\n",
+                error=None,
+                error_kind=None,
+            ),
+            f"{base}/sitemap.xml": _urlset([f"{base}/"]),
+        }
+        v = canned.get(url)
+        if isinstance(v, FetchResult):
+            return v
+        if v is None:
+            return FetchResult(url=url, html=None, error="HTTP 404", error_kind="http_404")
+        return FetchResult(url=url, html=v, error=None, error_kind=None)
+
+    monkeypatch.setattr(core_module.fetch, "get", _fetch)
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=False)
+    written = {a["slug"] for a in meta["urls_attempted"] if a["status"] == "written"}
+    assert "pricing" in written
+
+
+def test_namespaced_sitemap_parsed() -> None:
+    from pipeline.content_collection import sitemap as sitemap_mod
+
+    xml = _urlset(["https://acme.example/about", "https://acme.example/contact"], namespaced=True)
+
+    def _fetch(url: str) -> FetchResult:
+        return FetchResult(url=url, html=xml, error=None, error_kind=None)
+
+    urls = sitemap_mod.harvest_urls("https://acme.example/sitemap.xml", fetch=_fetch)
+    assert urls == ["https://acme.example/about", "https://acme.example/contact"]
+
+
+def test_sitemap_per_doc_cap() -> None:
+    from pipeline.content_collection import sitemap as sitemap_mod
+
+    urls = [f"https://acme.example/p{i}" for i in range(1000)]
+    xml = _urlset(urls)
+
+    def _fetch(url: str) -> FetchResult:
+        return FetchResult(url=url, html=xml, error=None, error_kind=None)
+
+    harvested = sitemap_mod.harvest_urls("https://acme.example/sitemap.xml", fetch=_fetch, max_urls_per_doc=500)
+    assert len(harvested) == 500
+
+
+# ---------------------------------------------------------------------------
 # Network smoke
 # ---------------------------------------------------------------------------
 

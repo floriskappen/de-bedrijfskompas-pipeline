@@ -1,28 +1,4 @@
-# content-collection Specification
-
-## Purpose
-Pipeline stage 2: fetch a curated subset of each company's website, extract clean markdown via trafilatura, and persist per-page markdown plus a `_meta.json` sidecar. The job is collection, not interpretation — downstream stages (`fact-extraction`, `content-summarization`) consume this output.
-## Requirements
-### Requirement: Input Record Shape
-
-The stage SHALL read its input from `data/website-resolution/<company-id>.json` per the canonical output of the upstream stage. Each record is a JSON object with at least `name` (string, required) and `website` (string, optional). All other keys SHALL be preserved unchanged into the stage's per-company `_meta.json`.
-
-If `website` is `null`, missing, or empty — typically because `website-resolution` recorded a failure for that company — the stage SHALL NOT attempt any HTTP fetch and SHALL write only `_meta.json` with `status: "upstream_failed"`, preserving the upstream error context when available.
-
-#### Scenario: Valid input with website
-
-- **WHEN** input is `{"name": "Acme B.V.", "website": "https://acme.example"}`
-- **THEN** the stage proceeds with page selection and fetching
-
-#### Scenario: Upstream failure propagation
-
-- **WHEN** input is `{"name": "Foo B.V.", "website": null, "status": "failed", "error": "no search results"}`
-- **THEN** no HTTP fetch is attempted; only `_meta.json` is written, with `status: "upstream_failed"` and the original upstream error retained
-
-#### Scenario: Extra input keys preserved
-
-- **WHEN** input is `{"name": "Acme B.V.", "website": "https://acme.example", "source": "incubator-list-2026-01"}`
-- **THEN** the resulting `_meta.json` retains `source` with the same value
+## MODIFIED Requirements
 
 ### Requirement: Page Selection
 
@@ -77,48 +53,6 @@ Sitemap discovery is best-effort: a missing, malformed, or non-XML sitemap respo
 - **WHEN** `/sitemap.xml` returns HTML (e.g. an SPA shell) instead of XML
 - **THEN** no exception is raised; the company proceeds with homepage-link candidates only
 
-### Requirement: Content Extraction
-
-For each selected URL the stage SHALL fetch the page via plain HTTP (no JavaScript rendering) and convert the response body to markdown using `trafilatura` with settings that prefer cleanliness over completeness: comments excluded, images excluded, links excluded, tables included, formatting (headings) preserved, deduplication enabled, precision favored over recall.
-
-A page whose extracted markdown is shorter than a minimum threshold (100 characters) SHALL be dropped silently — it carries no usable content and writing it would only add noise.
-
-#### Scenario: Successful extraction
-
-- **WHEN** a fetched page has substantive prose
-- **THEN** trafilatura returns markdown longer than the minimum threshold and the page is written
-
-#### Scenario: Sub-threshold page dropped
-
-- **WHEN** a fetched page yields fewer than 100 characters of extracted markdown
-- **THEN** no markdown file is written for that page, and the URL is recorded in `_meta.json.urls_attempted` so the drop is auditable
-
-#### Scenario: Plain HTTP only
-
-- **WHEN** a site relies on client-side JavaScript to render its content
-- **THEN** the stage extracts whatever the static HTML provides; it does NOT spin up a headless browser
-
-### Requirement: Footer Capture
-
-The stage SHALL extract the textual content of the homepage's `<footer>` element(s) separately from the trafilatura-extracted markdown and SHALL store it in `_meta.json.footer_text`. Footer text is treated as **metadata**, not page content, because it commonly contains structured facts (HQ address, postcode, Chamber of Commerce numbers) that trafilatura intentionally strips from its main-content extraction.
-
-If the homepage has no `<footer>` element or its contents are empty after whitespace stripping, `_meta.json.footer_text` SHALL be set to `null`.
-
-#### Scenario: Footer with address captured
-
-- **WHEN** the homepage HTML contains `<footer>...Europalaan 100, 3526 KS Utrecht...</footer>`
-- **THEN** `_meta.json.footer_text` contains "Europalaan 100, 3526 KS Utrecht" (alongside whatever other footer text is present)
-
-#### Scenario: Footer absent
-
-- **WHEN** the homepage has no `<footer>` element
-- **THEN** `_meta.json.footer_text` is `null`
-
-#### Scenario: Footer not duplicated into page markdown
-
-- **WHEN** trafilatura has stripped the footer from the homepage's markdown output (its default behavior)
-- **THEN** the stage does not attempt to re-inject footer text into `index.md`; the markdown stays as trafilatura produced it
-
 ### Requirement: Output File Layout
 
 For each company processed (successfully or not), the stage SHALL produce a subdirectory at `data/content-collection/<company-id>/` containing:
@@ -157,46 +91,6 @@ For each company processed (successfully or not), the stage SHALL produce a subd
 
 - **WHEN** a successful crawl consulted `/sitemap.xml` and harvested 12 URLs (of which 2 ended up in `urls_attempted` after tier filtering)
 - **THEN** `_meta.json` records `sitemap_consulted: true`, `sitemap_url: "https://acme.example/sitemap.xml"`, `sitemap_urls_found: 12`
-
-### Requirement: Status Tracking
-
-`_meta.json.status` SHALL take exactly one of these values:
-
-- `"ok"` — at least 3 pages were collected.
-- `"thin"` — between 1 and 2 pages were collected (homepage at minimum); useful but probably sparse for downstream analysis.
-- `"fetch_failed"` — the homepage itself could not be fetched (DNS error, HTTP error, timeout, redirect loop); zero pages produced.
-- `"upstream_failed"` — `website-resolution` did not produce a usable URL for this company; no fetch was attempted.
-
-Per-page errors (e.g. a single 404 inside a successful crawl) SHALL be recorded in `urls_attempted` with `status: "error"` and SHALL NOT change the company-level `status`.
-
-#### Scenario: Healthy crawl
-
-- **WHEN** 5 pages are successfully fetched and pass the content threshold
-- **THEN** `status` is `"ok"`
-
-#### Scenario: Thin result
-
-- **WHEN** only the homepage survives (other selected URLs all 404 or fall below threshold)
-- **THEN** `status` is `"thin"` and the failed URLs are recorded in `urls_attempted` with `status: "error"` or `status: "dropped_thin"`
-
-#### Scenario: Homepage unreachable
-
-- **WHEN** the homepage fetch itself fails
-- **THEN** `status` is `"fetch_failed"`, `pages_collected` is `0`, and the error is recorded in `urls_attempted`
-
-### Requirement: Failure Handling
-
-The stage SHALL NOT halt or raise on per-page or per-company failures. Errors on a single page SHALL be captured in that company's `_meta.json.urls_attempted` and processing SHALL continue with the next page. Errors that prevent processing an entire company (e.g. homepage fetch failure) SHALL result in a `_meta.json` with `status: "fetch_failed"` and processing SHALL continue with the next company.
-
-#### Scenario: Per-page error does not abort the crawl
-
-- **WHEN** the second selected URL for `acme` returns a 404
-- **THEN** `acme/_meta.json.urls_attempted` records the 404, the remaining selected URLs are still fetched, and `acme/_meta.json.status` is `"ok"` or `"thin"` based on how many pages succeeded
-
-#### Scenario: One bad company does not block the rest
-
-- **WHEN** processing a batch where the second company's homepage is unreachable
-- **THEN** companies one and three are still produced normally; company two gets a `_meta.json` with `status: "fetch_failed"`
 
 ### Requirement: Polite Crawling
 
@@ -237,6 +131,8 @@ The stage SHALL NOT:
 - **WHEN** `/robots.txt` contains `Disallow: /pricing` and the homepage links to `/pricing`
 - **THEN** `/pricing` is still fetched per the selection rules; the stage does not consult `Disallow:`
 
+## ADDED Requirements
+
 ### Requirement: Operational Pitfalls
 
 The following environmental and library-quirk hazards SHALL be handled by the implementation. They are not requirements on observable behaviour but are load-bearing for any re-implementation.
@@ -257,4 +153,3 @@ The following environmental and library-quirk hazards SHALL be handled by the im
 
 - **WHEN** `/sitemap.xml` returns `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">...<url><loc>https://acme.example/about</loc></url>...</urlset>`
 - **THEN** `https://acme.example/about` is harvested into the candidate pool
-
