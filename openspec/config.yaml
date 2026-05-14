@@ -20,6 +20,7 @@ context: |
 rules:
   proposal:
     - State what stage(s) this change affects and why
+    - Ideal length is ~15-50 lines. The shorter the better.
   specs:
     - Define input and output shape explicitly, in whatever format the stage produces (JSON for most stages, markdown for content stages)
     - List edge cases the stage must handle, and which it explicitly does not
@@ -28,5 +29,7 @@ rules:
     - Include an "Operational Pitfalls" section when relevant. Capture library quirks, defensive patches, and environmental gotchas discovered during implementation (e.g. "library X keeps module-level state across calls"). These are not requirements but a re-implementer must know them.
   design:
     - Keep design.md focused on rationale and trade-offs, not load-bearing data. If a list, constant, or vocabulary is required for correct behaviour, move it into specs/.
+    - Each architectural decision is maybe 5-10 lines -- what was chosen, what alternatives were considered, why this one. For a typical pipeline stage you'll have 3-6 decisions. Resist the agent's tendency to over-elaborate here.
+    - Ideal length is ~40-80 lines.
   tasks:
     - Treat tests as a first-class deliverable, not an afterthought. Each `#### Scenario:` in the spec should map to at least one named test in the task list; reference the test name explicitly so coverage is auditable.

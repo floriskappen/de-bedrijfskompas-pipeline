@@ -53,8 +53,12 @@ TIER_3_PATHS: Final = (
     "/insights", "/inzichten", "/articles", "/artikelen",
 )
 
-MAX_SELECTED_URLS: Final = 8
+MAX_SELECTED_URLS: Final = 12
 MIN_PAGES_BEFORE_TIER_3: Final = 3
+PER_PREFIX_CAP: Final = 2  # Max URLs sharing a single tier-path prefix
+# (e.g., at most 2 of /platform, /platform/discover-qualify, ... — prevents
+# deep sub-trees from monopolising the slot budget and crowding out other
+# tier-1/2 paths like /contact).
 
 _EXCLUDED_EXTENSIONS: Final = frozenset(
     {
@@ -156,6 +160,13 @@ def _classify(url: str) -> tuple[int, int] | None:
     return None
 
 
+def _path_depth(url: str) -> int:
+    """Number of non-empty path segments. ``/platform`` is 1, ``/platform/x`` is 2."""
+    path = urlparse(url).path or "/"
+    segments = [s for s in path.split("/") if s]
+    return len(segments) or 1
+
+
 def slugify_path(url_path_or_url: str) -> str:
     """Derive the markdown file slug from a URL or URL path.
 
@@ -191,8 +202,10 @@ def select_urls(
     used_slugs: set[str] = {homepage_slug}
     collisions: list[tuple[str, str]] = []
 
-    # Group candidates by tier and tier-path position.
-    tiered: dict[int, list[tuple[int, str]]] = {1: [], 2: [], 3: []}
+    # Group candidates by tier. Each entry is (depth, position, link) so the
+    # subsequent sort can prioritise top-level paths (depth=1) ahead of deeper
+    # sub-pages, with tier-position as a tie-breaker.
+    tiered: dict[int, list[tuple[int, int, str]]] = {1: [], 2: [], 3: []}
     seen_urls: set[str] = {homepage_url}
     for link in links:
         if link in seen_urls:
@@ -201,11 +214,12 @@ def select_urls(
         if cls is None:
             continue
         tier, pos = cls
-        tiered[tier].append((pos, link))
+        depth = _path_depth(link)
+        tiered[tier].append((depth, pos, link))
         seen_urls.add(link)
 
     for tier in (1, 2, 3):
-        tiered[tier].sort(key=lambda item: item[0])
+        tiered[tier].sort(key=lambda item: (item[0], item[1]))
 
     def _add(url: str) -> bool:
         slug = slugify_path(url)
@@ -216,18 +230,26 @@ def select_urls(
         selected.append((url, slug))
         return True
 
-    # Tier 1 and 2 fill the slate up to the cap.
+    # Tier 1 and 2 fill the slate up to the cap, with at most PER_PREFIX_CAP
+    # URLs sharing the same tier-path prefix (so /platform sub-pages can't
+    # eat the budget meant for /contact, /about, etc.). Candidates are
+    # pre-sorted depth-then-position so top-level paths land before deeper
+    # sub-pages.
     for tier in (1, 2):
-        for _pos, link in tiered[tier]:
+        prefix_count: dict[int, int] = {}
+        for _depth, pos, link in tiered[tier]:
             if len(selected) >= MAX_SELECTED_URLS:
                 break
-            _add(link)
+            if prefix_count.get(pos, 0) >= PER_PREFIX_CAP:
+                continue
+            if _add(link):
+                prefix_count[pos] = prefix_count.get(pos, 0) + 1
         if len(selected) >= MAX_SELECTED_URLS:
             break
 
     # Tier 3 only when we still need more pages to reach the minimum.
     if len(selected) < MIN_PAGES_BEFORE_TIER_3:
-        for _pos, link in tiered[3]:
+        for _depth, _pos, link in tiered[3]:
             if len(selected) >= MAX_SELECTED_URLS:
                 break
             if len(selected) >= MIN_PAGES_BEFORE_TIER_3:

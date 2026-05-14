@@ -14,6 +14,12 @@ from . import crawl, extract, fetch, sitemap
 
 DEFAULT_INTER_PAGE_SLEEP = 1.0
 
+# Slugs whose pages typically carry the company's physical address inside
+# structured side-blocks that trafilatura's precision mode classifies as
+# boilerplate. For these we ALSO emit a recall-extracted ``<slug>.recall.md``
+# so fact-extraction has a surface where the postcode anchor can land.
+ADDRESS_SLUGS: frozenset[str] = frozenset({"contact", "over-ons", "about", "about-us"})
+
 
 def process(
     record: dict,
@@ -60,6 +66,7 @@ def process(
 
     homepage_html = homepage_result.html or ""
     footer_text = extract.extract_footer_text(homepage_html)
+    recall_pages: dict[str, str] = {}
 
     links = crawl.extract_internal_links(homepage_url, homepage_html)
 
@@ -123,6 +130,13 @@ def process(
             continue
 
         pages_written[slug] = markdown
+        # For address-bearing slugs, also store a recall-mode extraction so
+        # fact-extraction sees structured address blocks that precision mode
+        # strips as boilerplate. Skipped silently if recall yields nothing.
+        if slug in ADDRESS_SLUGS:
+            recall_md = extract.extract_markdown_recall(html)
+            if recall_md and recall_md.strip():
+                recall_pages[slug] = recall_md
         page_meta = extract.extract_page_metadata(html)
         page_meta["url"] = url
         pages_meta[slug] = page_meta
@@ -147,7 +161,7 @@ def process(
     meta["sitemap_urls_found"] = sitemap_urls_found
 
     if write:
-        _write_company(meta, pages=pages_written, out_dir=out_dir)
+        _write_company(meta, pages=pages_written, recall_pages=recall_pages, out_dir=out_dir)
 
     return meta
 
@@ -190,7 +204,13 @@ def _meta_skeleton(record: dict, *, status: str) -> dict:
     return out
 
 
-def _write_company(meta: dict, *, pages: dict[str, str], out_dir: Path) -> None:
+def _write_company(
+    meta: dict,
+    *,
+    pages: dict[str, str],
+    recall_pages: dict[str, str] | None = None,
+    out_dir: Path,
+) -> None:
     name = meta.get("name")
     if not isinstance(name, str) or not name.strip():
         return
@@ -214,6 +234,8 @@ def _write_company(meta: dict, *, pages: dict[str, str], out_dir: Path) -> None:
     company_dir.mkdir(parents=True, exist_ok=True)
     for slug, markdown in pages.items():
         (company_dir / f"{slug}.md").write_text(markdown, encoding="utf-8")
+    for slug, recall_md in (recall_pages or {}).items():
+        (company_dir / f"{slug}.recall.md").write_text(recall_md, encoding="utf-8")
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",

@@ -99,10 +99,56 @@ def test_select_urls_tier_ordering_and_matching() -> None:
 def test_select_urls_enforces_cap() -> None:
     base = "https://acme.example"
     homepage = base + "/"
-    # 10 tier-1 candidates, all distinct slugs.
-    links = [base + p for p in ("/about", "/over-ons", "/mission", "/vision", "/services", "/diensten", "/products", "/oplossingen", "/platform", "/impact")]
+    # 14 tier-1 candidates, all distinct slugs and distinct tier-path prefixes.
+    links = [
+        base + p for p in (
+            "/about", "/over-ons", "/mission", "/vision", "/services",
+            "/diensten", "/products", "/oplossingen", "/platform",
+            "/impact", "/expertise", "/portfolio", "/sectors", "/technology",
+        )
+    ]
     selected, _ = select_urls(homepage, links)
-    assert len(selected) == 8
+    assert len(selected) == 12  # MAX_SELECTED_URLS
+
+
+def test_select_urls_top_level_beats_subpages() -> None:
+    base = "https://acme.example"
+    homepage = base + "/"
+    # /platform sub-pages (depth 2) compete with /contact (depth 1, tier-2).
+    # With depth-first ordering AND per-prefix cap=2, /contact must be selected
+    # while only 2 of the /platform/* sub-pages get in.
+    links = [
+        base + "/platform",
+        base + "/platform/a", base + "/platform/b", base + "/platform/c",
+        base + "/platform/d", base + "/platform/e", base + "/platform/f",
+        base + "/contact",
+    ]
+    selected, _ = select_urls(homepage, links)
+    urls = {u for u, _ in selected}
+    assert base + "/contact" in urls
+    # Per-prefix cap: at most 2 URLs matching the /platform tier-path prefix.
+    platform_count = sum(1 for u in urls if u.startswith(base + "/platform"))
+    assert platform_count <= 2
+
+
+def test_select_urls_per_prefix_cap_leaves_room_for_others() -> None:
+    # Even without competing top-level paths from the same depth, the per-prefix
+    # cap must hold so other prefixes get a turn.
+    base = "https://acme.example"
+    homepage = base + "/"
+    links = [
+        base + "/platform",
+        base + "/platform/a", base + "/platform/b", base + "/platform/c",
+        base + "/about", base + "/contact", base + "/careers",
+    ]
+    selected, _ = select_urls(homepage, links)
+    urls = {u for u, _ in selected}
+    platform_count = sum(1 for u in urls if u.startswith(base + "/platform"))
+    assert platform_count <= 2
+    # /about, /contact, /careers all land — they're not crowded out.
+    assert base + "/about" in urls
+    assert base + "/contact" in urls
+    assert base + "/careers" in urls
 
 
 def test_select_urls_tier3_fallback() -> None:
@@ -194,6 +240,30 @@ def test_footer_strips_embedded_style_and_script() -> None:
 def test_footer_absent_or_empty() -> None:
     assert extract_footer_text(_wrap("<p>no footer</p>")) is None
     assert extract_footer_text(_wrap("<footer>   \n  </footer>")) is None
+
+
+def test_footer_block_boundaries_preserved() -> None:
+    # Block-level elements emit newlines so sibling inline elements don't fuse
+    # into single tokens (e.g. LinkedIn + Instagram → LinkedInInstagram), and
+    # so the downstream postcode anchor sees Smallepad / 3811 MG / Amersfoort
+    # on separate "lines" for clean field extraction.
+    html = _wrap(
+        "<footer>"
+        "<p>Smallepad 32</p>"
+        "<p>3811 MG Amersfoort</p>"
+        "<div>Volg ons</div>"
+        "<a>LinkedIn</a><a>Instagram</a>"
+        "</footer>"
+    )
+    out = extract_footer_text(html)
+    assert out is not None
+    lines = out.split("\n")
+    assert "Smallepad 32" in lines
+    assert "3811 MG Amersfoort" in lines
+    assert "Volg ons" in lines
+    # Inline siblings must NOT fuse; each is on its own (line or token).
+    assert "LinkedInInstagram" not in out
+    assert "LinkedIn" in out and "Instagram" in out
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +416,64 @@ def test_process_write_false_no_disk(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     out_dir2 = tmp_path / "out"
     payload_wet = core_module.process(record, out_dir=out_dir2, write=True)
     assert payload_dry == payload_wet
+
+
+def test_process_writes_recall_md_for_address_slugs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS),
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    # Make the recall extraction return a deterministic, non-empty body so
+    # we can assert the file gets written for address-bearing slugs.
+    monkeypatch.setattr(
+        core_module.extract,
+        "extract_markdown_recall",
+        lambda html: "RECALL BODY with Europalaan 100, 3526 KS Utrecht",
+    )
+
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    core_module.process(record, out_dir=tmp_path, write=True)
+
+    company_dir = tmp_path / "acme"
+    # Address-bearing slugs get a .recall.md companion.
+    assert (company_dir / "about.recall.md").exists()
+    assert (company_dir / "contact.recall.md").exists()
+    # Non-address slugs do NOT.
+    assert not (company_dir / "team.recall.md").exists()
+    assert not (company_dir / "index.recall.md").exists()
+
+
+def test_process_omits_recall_md_when_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS),
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    # Recall returns nothing usable → no .recall.md file should appear.
+    monkeypatch.setattr(
+        core_module.extract,
+        "extract_markdown_recall",
+        lambda html: None,
+    )
+
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    core_module.process(record, out_dir=tmp_path, write=True)
+
+    company_dir = tmp_path / "acme"
+    assert (company_dir / "about.md").exists()  # precision still written
+    assert not (company_dir / "about.recall.md").exists()
+    assert not (company_dir / "contact.recall.md").exists()
 
 
 def test_process_name_mismatch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
