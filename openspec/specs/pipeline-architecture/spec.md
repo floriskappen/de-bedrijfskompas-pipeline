@@ -10,8 +10,8 @@ The pipeline SHALL be composed of the following stages, executed in order:
 1. `website-resolution`
 2. `content-collection`
 3. `fact-extraction` — extracts structured facts (e.g. HQ address) that require verbatim content rather than a summary.
-4. `content-summarization` — produces a compact prose summary intended as input to the stage-5 theme-analytic stages.
-5. theme-analytic stages that depend on `content-summarization` and run independently of each other (order between them is not defined): `bullshit-scoring`, `bcorp-scoring`, and future analytic stages of the same shape (e.g. `tagging`, `ikigai-matching`).
+4. `content-summarization` — produces a faithful, de-marketed, English company dossier of variable length (driven by available substance, not a fixed size) intended as the input to the stage-5 theme-analytic stages.
+5. theme-analytic stages that consume the `content-summarization` dossier and run independently of each other (order between them is not defined): `bullshit-scoring`, `bcorp-scoring`, and future analytic stages of the same shape (e.g. `tagging`, `ikigai-matching`). Because the dossier is already de-marketed, these stages read it rather than the raw page text; `bullshit-scoring` derives the concise no-bullshit company description from the dossier.
 6. `dataset-output`
 
 A downstream stage MUST NOT run for a given company until all stages it depends on have produced output for that company.
