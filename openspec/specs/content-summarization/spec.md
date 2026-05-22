@@ -175,8 +175,8 @@ The same input SHALL produce the same output record across modes (the only diffe
 
 The stage SHALL NOT:
 
-- Score, rate, or rank the company (bullshit-scoring, bcorp-scoring are downstream stage-5 stages).
-- Produce the concise human-facing front-end description (a downstream stage derives that from the dossier).
+- Score, rate, or rank the company (`bcorp-scoring` and other stage-5 analytic stages are downstream).
+- Produce the concise human-facing front-end description (`tagline-extraction` derives that from the dossier).
 - Perform philosophical-framework mapping, tagging, or ikigai-matching.
 - Extract structured facts such as the HQ address (that is `fact-extraction`).
 - Re-fetch or re-parse raw HTML — it consumes only `content-collection` artefacts.
@@ -184,7 +184,7 @@ The stage SHALL NOT:
 #### Scenario: No scoring emitted
 
 - **WHEN** the source contains heavy marketing language
-- **THEN** the dossier reflects the de-marketed substance but emits no bullshit score or rating
+- **THEN** the dossier reflects the de-marketed substance but emits no score or rating
 
 ### Requirement: Operational Pitfalls
 

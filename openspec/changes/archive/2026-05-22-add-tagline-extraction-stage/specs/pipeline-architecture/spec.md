@@ -1,9 +1,5 @@
-# pipeline-architecture Specification
+## MODIFIED Requirements
 
-## Purpose
-Specify the overall architecture of the offline batch pipeline: its stage sequence, the on-disk seam between stages, the output file layout, the per-stage execution modes, and how failures propagate downstream.
-
-## Requirements
 ### Requirement: Stage Sequence
 
 The pipeline SHALL be composed of the following stages, executed in order:
@@ -31,30 +27,6 @@ A downstream stage MUST NOT run for a given company until all stages it depends 
 
 - **WHEN** `dataset-output` runs for a company
 - **THEN** the output of `fact-extraction` and the outputs of every stage-5 theme-analytic stage for that company MUST already exist on disk
-
-### Requirement: Stage Seam Contract
-
-Each stage SHALL read its input as file(s) on disk and write its output as file(s) on disk, in whatever structured format the stage's contract specifies (JSON for most stages; other formats such as markdown are permitted when the stage's output is naturally human-readable content rather than structured data). Stages SHALL NOT exchange data through in-process memory, shared globals, or direct function calls into another stage. The choice of format is a per-stage decision; the no-in-memory-handoff rule is universal.
-
-#### Scenario: Stage reads upstream output from disk
-
-- **WHEN** a stage begins processing a company
-- **THEN** it MUST obtain its input by reading the file(s) written by its upstream stage(s) from disk
-
-#### Scenario: Stage persists output before being considered complete
-
-- **WHEN** a stage finishes producing a result for a company
-- **THEN** the result MUST be written to disk before any downstream stage is allowed to consume it
-
-#### Scenario: No in-memory handoff
-
-- **WHEN** two stages run in the same process
-- **THEN** the downstream stage MUST still read the upstream stage's output from disk rather than receiving it as a function argument or in-memory object
-
-#### Scenario: Format is per-stage
-
-- **WHEN** `content-collection` produces markdown and `content-summarization` produces JSON
-- **THEN** both satisfy the seam contract; the contract does not mandate a single format across stages
 
 ### Requirement: Output File Layout
 
@@ -90,35 +62,7 @@ A stage MUST commit to exactly one of these layouts; mixing both within the same
 - **WHEN** any stage produces output
 - **THEN** it MUST NOT use a JSONL file aggregating multiple companies, and MUST NOT introduce a per-run subdirectory like `data/<stage>/<run-id>/...`
 
-### Requirement: Stage Execution Model
-
-Every pipeline stage SHALL be implemented as a self-contained Python module that supports three execution modes:
-
-1. **Standalone CLI**: the stage MUST be runnable from the command line as `python -m <stage-module>` (or equivalent), reading its input from disk (or the configured source for stage 1) and writing its output to disk per the Output File Layout requirement.
-2. **Orchestrator-callable**: the stage MUST expose a programmatic entry point (a function) that a future pipeline orchestrator can invoke without subprocess overhead. The entry point's contract MUST match the on-disk seam — same input shape in, same output shape out — so behavior does not diverge between modes.
-3. **Dry-run / no-write mode**: the stage MUST support a mode in which all logic runs (search calls, transformations, etc.) but no output files are written to disk. Dry-run mode is intended for tests; it MAY return outputs in memory to the caller.
-
-These three modes apply to every stage in the Stage Sequence requirement, including any future analytical stages added under stage 5.
-
-#### Scenario: Stage runs standalone from CLI
-
-- **WHEN** a developer runs `python -m pipeline.<stage>` with the stage's expected input available
-- **THEN** the stage processes the input and writes outputs to `data/<stage>/<company-id>.json` per the Output File Layout
-
-#### Scenario: Stage callable by an orchestrator
-
-- **WHEN** an orchestrator imports the stage's module and calls its programmatic entry point with an input record
-- **THEN** the stage produces the same output it would have written to disk in CLI mode
-
-#### Scenario: Dry-run produces no files
-
-- **WHEN** the stage is invoked in dry-run mode against a batch of inputs
-- **THEN** the stage performs its normal processing logic but writes nothing to `data/<stage>/`
-
-#### Scenario: Behavior parity across modes
-
-- **WHEN** the same input is processed in CLI mode, orchestrator mode, and dry-run mode
-- **THEN** the resulting output record is identical in all three modes (the only difference is whether/where it is persisted)
+## ADDED Requirements
 
 ### Requirement: Failure Propagation
 
@@ -146,4 +90,3 @@ A stage that gates on upstream status SHALL NOT perform expensive work (network 
 
 - **WHEN** `dataset-output` finds no output file for a company under some stage's directory
 - **THEN** it interprets this as the stage not having run for that company, distinct from a record present with a failure status
-
