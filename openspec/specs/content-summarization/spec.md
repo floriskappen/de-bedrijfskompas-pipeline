@@ -175,7 +175,7 @@ The same input SHALL produce the same output record across modes (the only diffe
 
 The stage SHALL NOT:
 
-- Score, rate, or rank the company (`bcorp-scoring` and other stage-5 analytic stages are downstream).
+- Score, rate, or rank the company (`global-scoring` and other stage-5 analytic stages are downstream).
 - Produce the concise human-facing front-end description (`tagline-extraction` derives that from the dossier).
 - Perform philosophical-framework mapping, tagging, or ikigai-matching.
 - Extract structured facts such as the HQ address (that is `fact-extraction`).
