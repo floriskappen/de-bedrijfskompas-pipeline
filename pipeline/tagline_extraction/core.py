@@ -29,7 +29,7 @@ def process(
     write: bool,
     offline: bool = False,
 ) -> dict:
-    """Generate a bilingual tagline for one company. Raises only on company-id collision."""
+    """Generate an English tagline for one company. Raises only on company-id collision."""
     if meta.get("status") != "ok":
         result = _record(meta, status="upstream_failed")
     elif not body.strip():
@@ -108,7 +108,7 @@ def _record(
         "website": meta.get("website"),
         "status": status,
         "model": model,
-        "tagline": tagline if tagline is not None else {"en": None, "nl": None},
+        "tagline": tagline if tagline is not None else {"en": None},
     }
 
 

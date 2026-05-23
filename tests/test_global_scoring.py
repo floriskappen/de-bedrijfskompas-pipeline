@@ -26,7 +26,7 @@ DOSSIER_DIR = REPO_ROOT / "data" / "content-summarization"
 
 
 def _axis(score: int | None = 60, evidence: str = "well_evidenced") -> dict:
-    return {"score": score, "evidence": evidence, "reason": {"en": "Because reasons.", "nl": "Vanwege redenen."}}
+    return {"score": score, "evidence": evidence, "reason": {"en": "Because reasons."}}
 
 
 def _scores(**overrides: dict) -> dict:
@@ -185,7 +185,7 @@ def test_prompt_loaded_from_file() -> None:
 
 def _ok_payload() -> str:
     axes = ", ".join(
-        f'"{a}": {{"score": 60, "evidence": "well_evidenced", "reason": {{"en": "ok", "nl": "oké"}}}}'
+        f'"{a}": {{"score": 60, "evidence": "well_evidenced", "reason": {{"en": "ok"}}}}'
         for a in AXES
     )
     return "{" + axes + "}"
@@ -209,7 +209,7 @@ def test_model_override_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_malformed_response_is_error() -> None:
     """Scenario: Malformed response is an error."""
     # Missing an axis → LLMError after retries.
-    partial = '{"substance": {"score": 50, "evidence": "partial", "reason": {"en": "x", "nl": "x"}}}'
+    partial = '{"substance": {"score": 50, "evidence": "partial", "reason": {"en": "x"}}}'
     with patch.object(llm_module.httpx, "post", lambda url, **kw: _FakeResp(partial)):
         with pytest.raises(LLMError):
             llm_module.call([{"role": "user", "content": "hi"}])
@@ -264,7 +264,7 @@ def test_evidenced_axis_has_numeric_score() -> None:
     result = _proc(_meta(), scores=_scores(substance=_axis(80, "well_evidenced")))
     axis = result["scores"]["substance"]
     assert isinstance(axis["score"], int) and 0 <= axis["score"] <= 100
-    assert axis["reason"]["en"] and axis["reason"]["nl"]
+    assert axis["reason"]["en"]
 
 
 def test_no_signal_axis_has_null_score() -> None:
@@ -273,7 +273,15 @@ def test_no_signal_axis_has_null_score() -> None:
     axis = result["scores"]["power"]
     assert axis["score"] is None
     assert axis["evidence"] == "no_signal"
-    assert axis["reason"]["en"] and axis["reason"]["nl"]
+    assert axis["reason"]["en"]
+
+
+def test_reason_en_only() -> None:
+    """Scenario: Reason has en and no nl key (English-only output)."""
+    result = _proc(_meta(), scores=_scores())
+    for axis_name, axis in result["scores"].items():
+        assert "en" in axis["reason"], axis_name
+        assert "nl" not in axis["reason"], axis_name
 
 
 # ---------------------------------------------------------------------------
@@ -451,19 +459,6 @@ def test_reason_explains_rather_than_quotes() -> None:
         pytest.skip("gravity not scorable")
     for axis in result["scores"].values():
         assert '"' not in axis["reason"]["en"], axis["reason"]["en"]
-
-
-@pytest.mark.network
-def test_bilingual_parity() -> None:
-    """Scenario: Bilingual parity."""
-    _require_network()
-    result = _score("land-life-company")
-    if result["status"] != "ok":
-        pytest.skip("land-life-company not scorable")
-    for name, axis in result["scores"].items():
-        en, nl = axis["reason"]["en"], axis["reason"]["nl"]
-        assert en and nl, name
-        assert en != nl, name  # an actual Dutch rendering, not a copy
 
 
 @pytest.mark.network

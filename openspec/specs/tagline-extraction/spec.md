@@ -33,19 +33,19 @@ The stage SHALL inspect the dossier frontmatter `status` before any LLM call. It
 
 ### Requirement: Output Record File
 
-For each company the stage SHALL write one JSON file at `data/tagline-extraction/<company-id>.json` containing `name`, `website`, `status`, `model`, and `tagline`. The `tagline` field SHALL be an object with `en` and `nl` string members when `status` is `ok`, and `{"en": null, "nl": null}` otherwise. `model` SHALL be null when no LLM call was made.
+For each company the stage SHALL write one JSON file at `data/tagline-extraction/<company-id>.json` containing `name`, `website`, `status`, `model`, and `tagline`. The `tagline` field SHALL be an object with an `en` string member when `status` is `ok`, and `{"en": null}` otherwise. `model` SHALL be null when no LLM call was made.
 
 Downstream stages join this file to other stage outputs by `<company-id>` (the filename). A company-id collision with a differing `name` SHALL be a hard error: the stage SHALL NOT overwrite an existing file whose stored `name` differs from the current record's name; it SHALL raise.
 
 #### Scenario: Successful record shape
 
 - **WHEN** company `acme` is processed successfully
-- **THEN** `data/tagline-extraction/acme.json` exists with `status: "ok"`, a non-null `model`, and `tagline` carrying non-empty `en` and `nl` strings
+- **THEN** `data/tagline-extraction/acme.json` exists with `status: "ok"`, a non-null `model`, and `tagline.en` carrying a non-empty string
 
-#### Scenario: Null taglines on non-ok status
+#### Scenario: Null tagline on non-ok status
 
 - **WHEN** a company's record has any status other than `ok`
-- **THEN** its `tagline` is `{"en": null, "nl": null}`
+- **THEN** its `tagline` is `{"en": null}`
 
 #### Scenario: Name-collision refusal
 
@@ -54,22 +54,17 @@ Downstream stages join this file to other stage outputs by `<company-id>` (the f
 
 ### Requirement: Tagline Content
 
-The `en` tagline SHALL be a plain-language description a non-technical reader understands at a glance, and the `nl` tagline SHALL be its faithful Dutch rendering of the same meaning. It SHALL convey what the company actually does and who it is for, with the honest who-pays-for-what relationship coming through rather than the company's mission or self-description — but it SHALL NOT be forced into a fixed "[customer] pays [company]" template; the verb SHALL fit the company (a product company "makes"/"sells", a service company is "hired by"/"paid by"). It SHALL name the core activity rather than enumerate the full product list. It SHALL NOT repeat the company's own name, which is displayed alongside the tagline; it SHALL open with what the company does or a short descriptor (e.g. "A digital consultancy hired by…", "Sells…", "Makes…"). It SHALL use no jargon, no marketing adjectives (e.g. "innovative", "leading", "cutting-edge"), and add no facts absent from the dossier. It SHALL be one sentence; a second sentence is permitted only when the dossier is too thin or self-contradictory to convey the core in one, and that second sentence SHALL state the limitation (e.g. "However, no specific offerings are listed at the time of analysis").
+The `en` tagline SHALL be a plain-language description a non-technical reader understands at a glance. It SHALL convey what the company actually does and who it is for, with the honest who-pays-for-what relationship coming through rather than the company's mission or self-description — but it SHALL NOT be forced into a fixed "[customer] pays [company]" template; the verb SHALL fit the company (a product company "makes"/"sells", a service company is "hired by"/"paid by"). It SHALL name the core activity rather than enumerate the full product list. It SHALL NOT repeat the company's own name, which is displayed alongside the tagline; it SHALL open with what the company does or a short descriptor (e.g. "A digital consultancy hired by…", "Sells…", "Makes…"). It SHALL use no jargon, no marketing adjectives (e.g. "innovative", "leading", "cutting-edge"), and add no facts absent from the dossier. It SHALL be one sentence; a second sentence is permitted only when the dossier is too thin or self-contradictory to convey the core in one, and that second sentence SHALL state the limitation (e.g. "However, no specific offerings are listed at the time of analysis").
 
 #### Scenario: Honest revenue relationship comes through
 
 - **WHEN** the dossier describes a B2B agency wrapped in mission language
-- **THEN** the tagline conveys who pays the company and for what (e.g. "A digital consultancy hired by clients to design and build their software"), not the marketing mission, and does not retreat into vague phrasing such as "helps companies with digital solutions"
+- **THEN** the tagline conveys who pays the company and for what (e.g. "A digital consultancy hired by clients to design and build their software"), not the marketing mission
 
 #### Scenario: Company name omitted
 
 - **WHEN** a tagline is produced for a company whose name is a distinctive word
-- **THEN** neither the `en` nor the `nl` tagline contains the company's name, since it is shown next to the tagline
-
-#### Scenario: Bilingual parity
-
-- **WHEN** a tagline is produced
-- **THEN** `en` and `nl` express the same meaning, neither left blank
+- **THEN** the `en` tagline does not contain the company's name, since it is shown next to the tagline
 
 #### Scenario: Thin dossier gets a caveat sentence
 
@@ -83,7 +78,7 @@ The `en` tagline SHALL be a plain-language description a non-technical reader un
 
 ### Requirement: LLM Generation
 
-The stage SHALL produce each tagline with a single LLM call via OpenRouter, returning a JSON object with `en` and `nl` string keys. The prompt SHALL be loaded from a versioned file under `prompts/`, identified by name; prompts SHALL NOT be inlined in code. The default model SHALL be a DeepSeek model, overridable via the `TAGLINE_EXTRACTION_MODEL` environment variable. A response that cannot be parsed into an object with non-empty `en` and `nl` strings SHALL be treated as an LLM error.
+The stage SHALL produce each tagline with a single LLM call via OpenRouter, returning a JSON object with an `en` string key. The prompt SHALL be loaded from a versioned file under `prompts/`, identified by name; prompts SHALL NOT be inlined in code. The default model SHALL be a DeepSeek model, overridable via the `TAGLINE_EXTRACTION_MODEL` environment variable. A response that cannot be parsed into an object with a non-empty `en` string SHALL be treated as an LLM error.
 
 #### Scenario: Prompt loaded from versioned file
 
@@ -97,14 +92,14 @@ The stage SHALL produce each tagline with a single LLM call via OpenRouter, retu
 
 #### Scenario: Malformed response is an error
 
-- **WHEN** the model returns text that is not a JSON object with non-empty `en` and `nl`
-- **THEN** the company's record is written with `status: llm_error` and null taglines
+- **WHEN** the model returns text that is not a JSON object with a non-empty `en` string
+- **THEN** the company's record is written with `status: llm_error` and `tagline: {"en": null}`
 
 ### Requirement: Status Tracking
 
 The `status` field SHALL take exactly one value, each tied to a distinct outcome:
 
-- `ok` — a bilingual tagline was generated.
+- `ok` — an English tagline was generated.
 - `upstream_failed` — the dossier is missing or its frontmatter `status` is not `ok`; no LLM call is made.
 - `empty` — the dossier frontmatter is `ok` but its body has no usable text; no LLM call is made. The offline mode short-circuit also yields this status.
 - `llm_error` — the LLM call failed after retries or returned an unparseable/incomplete response.

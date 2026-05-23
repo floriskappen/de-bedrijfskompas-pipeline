@@ -58,7 +58,7 @@ Keep the axes **independent**: judge each only on its own question. The same com
 
 For each axis, **decide the explanation first, then assign the number it implies** — write `reason` before `score`, never the reverse.
 
-- **reason**: write it **in English first** (`en`), grounded in the dossier's actual substance and naming the signals you used; then translate that same explanation faithfully into Dutch (`nl`). Keep each language to **at most ~200 characters** (one or two short sentences). No marketing adjectives; add no facts that are not in the dossier.
+- **reason**: write it **in English** (`en`), grounded in the dossier's actual substance and naming the signals you used. Keep it to **at most ~200 characters** (one or two short sentences). No marketing adjectives; add no facts that are not in the dossier.
 - **evidence**: how well the dossier supports your judgement — `well_evidenced` (concrete, specific signal), `partial` (some signal, thin or indirect), or `no_signal` (nothing real to judge on).
 - **score**: an integer 0–100 — 0 = strongly negative, 50 = neutral/mixed, 100 = strongly positive — that follows from the reason you just wrote. Use the full range; do not cluster everything at 50. When **evidence is `no_signal` the score MUST be `null`**; `no_signal` is only allowed where the axis rules above permit it (power, and rarely the others). Where an axis says "silence counts against" or "low, not no_signal" (substance, ecology, embeddedness, posture), prefer a numeric score.
 
@@ -68,11 +68,11 @@ Output **only** this JSON object — no preamble, no code fence:
 
 ```json
 {
-  "substance":    {"reason": {"en": "...", "nl": "..."}, "evidence": "well_evidenced|partial|no_signal", "score": 0-100 or null},
-  "ecology":      {"reason": {"en": "...", "nl": "..."}, "evidence": "...", "score": 0-100 or null},
-  "power":        {"reason": {"en": "...", "nl": "..."}, "evidence": "...", "score": 0-100 or null},
-  "embeddedness": {"reason": {"en": "...", "nl": "..."}, "evidence": "...", "score": 0-100 or null},
-  "posture":      {"reason": {"en": "...", "nl": "..."}, "evidence": "...", "score": 0-100 or null}
+  "substance":    {"reason": {"en": "..."}, "evidence": "well_evidenced|partial|no_signal", "score": 0-100 or null},
+  "ecology":      {"reason": {"en": "..."}, "evidence": "...", "score": 0-100 or null},
+  "power":        {"reason": {"en": "..."}, "evidence": "...", "score": 0-100 or null},
+  "embeddedness": {"reason": {"en": "..."}, "evidence": "...", "score": 0-100 or null},
+  "posture":      {"reason": {"en": "..."}, "evidence": "...", "score": 0-100 or null}
 }
 ```
 

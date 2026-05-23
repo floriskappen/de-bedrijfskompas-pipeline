@@ -1,8 +1,7 @@
 """Thin OpenRouter client for tagline-extraction LLM calls.
 
-Returns a parsed ``{"en": ..., "nl": ...}`` object (like fact-extraction's client),
-not raw text. A response that will not parse into an object with non-empty ``en``
-and ``nl`` strings is treated as an :class:`LLMError`.
+Returns a parsed ``{"en": ...}`` object. A response that will not parse into an
+object with a non-empty ``en`` string is treated as an :class:`LLMError`.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def call(
     """Call OpenRouter and return the parsed ``{en, nl}`` object.
 
     Raises :class:`LLMError` after *retries* transport/decode failures, or if the
-    response lacks non-empty ``en`` and ``nl`` string members.
+    response lacks a non-empty ``en`` string member.
     """
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     resolved_model = resolve_model(model)
@@ -75,10 +74,10 @@ def call(
 
 
 def _parse_tagline(text: str) -> dict:
-    """Parse the completion into ``{en, nl}``, stripping a code fence if present.
+    """Parse the completion into ``{en}``, stripping a code fence if present.
 
-    Raises ``ValueError`` if the object lacks non-empty ``en`` and ``nl`` strings,
-    so the caller's retry/​error path treats it as a failed call.
+    Raises ``ValueError`` if the object lacks a non-empty ``en`` string, so the
+    caller's retry/error path treats it as a failed call.
     """
     stripped = (text or "").strip()
     m = _FENCE_RE.match(stripped)
@@ -88,9 +87,7 @@ def _parse_tagline(text: str) -> dict:
 
     if not isinstance(obj, dict):
         raise ValueError("tagline response is not a JSON object")
-    en, nl = obj.get("en"), obj.get("nl")
+    en = obj.get("en")
     if not isinstance(en, str) or not en.strip():
         raise ValueError("tagline response missing non-empty 'en'")
-    if not isinstance(nl, str) or not nl.strip():
-        raise ValueError("tagline response missing non-empty 'nl'")
-    return {"en": en.strip(), "nl": nl.strip()}
+    return {"en": en.strip()}

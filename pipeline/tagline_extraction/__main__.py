@@ -24,7 +24,7 @@ DEFAULT_OUT_DIR = Path("data/tagline-extraction")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m pipeline.tagline_extraction",
-        description="Generate a bilingual plain-language tagline per company from its dossier.",
+        description="Generate an English plain-language tagline per company from its dossier.",
     )
     parser.add_argument(
         "--input",

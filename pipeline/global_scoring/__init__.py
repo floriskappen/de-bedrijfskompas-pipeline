@@ -4,7 +4,8 @@ Reads one company's de-marketed dossier from ``data/content-summarization/<id>.m
 and writes a single JSON record to ``data/global-scoring/<id>.json`` carrying a score
 for each of the five structural axes from ``docs/GLOBAL_SCORING_FRAMEWORK.md``
 (substance, ecology, power, embeddedness, posture). Each axis carries a 0-100 score
-(or null when there is no signal), an evidence level, and a bilingual (en + nl) reason.
+(or null when there is no signal), an evidence level, and an English reason. Dutch
+is added downstream by the translation stage.
 Analytic, not generative: it scores a profile, it produces no composite number.
 """
 

@@ -24,7 +24,7 @@ SMALL_TEST_SET = REPO_ROOT / "test-set" / "companies.json"
 MEDIUM_TEST_SET = REPO_ROOT / "test-set" / "companies-medium.json"
 DOSSIER_DIR = REPO_ROOT / "data" / "content-summarization"
 
-_TAGLINE = {"en": "A shop that sells widgets to builders.", "nl": "Een winkel die widgets verkoopt aan bouwers."}
+_TAGLINE = {"en": "A shop that sells widgets to builders."}
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def test_non_ok_dossier_cascades() -> None:
     """Scenario: Non-ok dossier cascades."""
     result = _proc(_meta(status="llm_error"), "irrelevant body")
     assert result["status"] == "upstream_failed"
-    assert result["tagline"] == {"en": None, "nl": None}
+    assert result["tagline"] == {"en": None}
     assert result["_mock_calls"] == 0
 
 
@@ -134,7 +134,7 @@ def test_llm_error_recorded() -> None:
     with patch.object(core_module.llm_module, "call", side_effect=LLMError("boom")):
         result = process(_meta(), "real body", out_dir=Path("/nonexistent"), write=False)
     assert result["status"] == "llm_error"
-    assert result["tagline"] == {"en": None, "nl": None}
+    assert result["tagline"] == {"en": None}
 
 
 def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
@@ -181,24 +181,32 @@ def test_model_override_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _fake_post(url, **kwargs):  # noqa: ANN001
         captured["model"] = kwargs["json"]["model"]
-        return _FakeResp('{"en": "a shop", "nl": "een winkel"}')
+        return _FakeResp('{"en": "a shop"}')
 
     with patch.object(llm_module.httpx, "post", _fake_post):
         out = llm_module.call([{"role": "user", "content": "hi"}])
-    assert out == {"en": "a shop", "nl": "een winkel"}
+    assert out == {"en": "a shop"}
     assert captured["model"] == "test/override-model"
 
 
 def test_malformed_response_is_error() -> None:
-    """Scenario: Malformed response is an error."""
-    # Missing 'nl' → unusable → LLMError after retries.
-    with patch.object(llm_module.httpx, "post", lambda url, **kw: _FakeResp('{"en": "only english"}')):
+    """Scenario: Malformed response is an error (missing en key)."""
+    # Missing 'en' entirely → LLMError after retries.
+    with patch.object(llm_module.httpx, "post", lambda url, **kw: _FakeResp('{"nl": "alleen Nederlands"}')):
         with pytest.raises(LLMError):
             llm_module.call([{"role": "user", "content": "hi"}])
     # Non-JSON garbage → LLMError.
     with patch.object(llm_module.httpx, "post", lambda url, **kw: _FakeResp("not json at all")):
         with pytest.raises(LLMError):
             llm_module.call([{"role": "user", "content": "hi"}])
+
+
+def test_malformed_response_missing_en() -> None:
+    """Scenario: Malformed response missing en is an llm_error on the record."""
+    with patch.object(llm_module.httpx, "post", lambda url, **kw: _FakeResp('{"other": "value"}')):
+        result = process(_meta(), "real body", out_dir=Path("/nonexistent"), write=False)
+    assert result["status"] == "llm_error"
+    assert result["tagline"] == {"en": None}
 
 
 # ---------------------------------------------------------------------------
@@ -213,14 +221,28 @@ def test_successful_record_shape(tmp_path: Path) -> None:
     rec = json.loads((tmp_path / f"{company_id('Acme B.V.')}.json").read_text(encoding="utf-8"))
     assert rec["status"] == "ok"
     assert rec["model"]  # non-null
-    assert rec["tagline"]["en"] and rec["tagline"]["nl"]
+    assert rec["tagline"]["en"]
     assert set(rec) == {"name", "website", "status", "model", "tagline"}
+
+
+def test_tagline_en_only_shape() -> None:
+    """Scenario: Tagline has en and no nl key (English-only output)."""
+    result = _proc(_meta(status="ok"), "Builders pay Acme for widgets.")
+    assert "en" in result["tagline"]
+    assert "nl" not in result["tagline"]
+
+
+def test_null_tagline_on_non_ok() -> None:
+    """Scenario: Null tagline on non-ok status has only en key."""
+    result = _proc(_meta(status="upstream_failed"), "body")
+    assert result["tagline"] == {"en": None}
+    assert "nl" not in result["tagline"]
 
 
 def test_null_taglines_on_non_ok() -> None:
     """Scenario: Null taglines on non-ok status."""
     result = _proc(_meta(status="upstream_failed"), "body")
-    assert result["tagline"] == {"en": None, "nl": None}
+    assert result["tagline"] == {"en": None}
     assert result["model"] is None
 
 
@@ -348,18 +370,6 @@ def test_company_name_omitted() -> None:
         if result["status"] != "ok":
             continue
         assert name_word not in result["tagline"]["en"].lower(), result["tagline"]["en"]
-        assert name_word not in result["tagline"]["nl"].lower(), result["tagline"]["nl"]
-
-
-@pytest.mark.network
-def test_bilingual_parity() -> None:
-    """Scenario: Bilingual parity (both languages present and distinct)."""
-    _require_network()
-    result = _taglines("brainial")
-    assert result["status"] == "ok"
-    en, nl = result["tagline"]["en"], result["tagline"]["nl"]
-    assert en and nl
-    assert en != nl  # an actual Dutch rendering, not a copy
 
 
 @pytest.mark.network

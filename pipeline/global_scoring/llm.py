@@ -1,7 +1,7 @@
 """Thin OpenRouter client for global-scoring LLM calls.
 
 Returns a validated five-axis object — one entry per axis in :data:`AXES`, each
-``{"score": int|None, "evidence": <level>, "reason": {"en": str, "nl": str}}``.
+``{"score": int|None, "evidence": <level>, "reason": {"en": str}}``.
 A response that will not parse and validate into that shape is treated as an
 :class:`LLMError`, so malformed/partial output never reaches the company record.
 """
@@ -143,10 +143,8 @@ def _validate_axis(axis: str, entry: object) -> dict:
     reason = entry.get("reason")
     if not isinstance(reason, dict):
         raise ValueError(f"axis {axis!r} reason is not an object")
-    en, nl = reason.get("en"), reason.get("nl")
+    en = reason.get("en")
     if not isinstance(en, str) or not en.strip():
         raise ValueError(f"axis {axis!r} reason missing non-empty 'en'")
-    if not isinstance(nl, str) or not nl.strip():
-        raise ValueError(f"axis {axis!r} reason missing non-empty 'nl'")
 
-    return {"score": score, "evidence": evidence, "reason": {"en": en.strip(), "nl": nl.strip()}}
+    return {"score": score, "evidence": evidence, "reason": {"en": en.strip()}}
