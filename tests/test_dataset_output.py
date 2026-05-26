@@ -290,16 +290,20 @@ def test_excluded_content_dropped(dirs):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_writes_one_json_per_company(dirs):
-    """write=True writes data/dataset-output/<id>.json per company."""
+def test_cli_writes_aggregated_json(dirs):
+    """write=True writes all company records to a single companies.json list file."""
     _full(dirs, "acme")
-    list(run(["acme"], out_dir=dirs["out_dir"], write=True,
+    _full(dirs, "beta", name="Beta B.V.")
+    list(run(["acme", "beta"], out_dir=dirs["out_dir"], write=True,
              fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
              tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
              geocoding_dir=dirs["geocoding_dir"]))
-    out = dirs["out_dir"] / "acme.json"
+    out = dirs["out_dir"] / "companies.json"
     assert out.exists()
-    assert json.loads(out.read_text())["company_id"] == "acme"
+    data = json.loads(out.read_text())
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert {r["company_id"] for r in data} == {"acme", "beta"}
 
 
 def test_dry_run_writes_nothing(dirs):
@@ -311,13 +315,14 @@ def test_dry_run_writes_nothing(dirs):
 
 
 def test_company_id_collision_raises(dirs):
-    """Existing output file with a different name → raises."""
+    """Duplicate company IDs in the list passed to run/write raises a RuntimeError."""
     _full(dirs, "acme", name="Acme B.V.")
-    _proc(dirs, "acme", write=True)
-    # Overwrite the spine with a different company sharing the id, then re-run.
-    _write(dirs["fact_dir"], "acme", _fact("Other Co", address=_ADDRESS))
+    # If we run with a duplicate company ID in the input list, it should raise.
     with pytest.raises(RuntimeError, match="collision"):
-        _proc(dirs, "acme", write=True)
+        list(run(["acme", "acme"], out_dir=dirs["out_dir"], write=True,
+                 fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
+                 tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+                 geocoding_dir=dirs["geocoding_dir"]))
 
 
 def test_one_failure_does_not_abort_batch(dirs, monkeypatch):

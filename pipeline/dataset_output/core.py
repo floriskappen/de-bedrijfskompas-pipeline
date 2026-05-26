@@ -50,7 +50,7 @@ def process(
 
     record = _assemble(cid, fact, scoring, tagline, translation, geocoding)
     if write:
-        _write(record, out_dir=out_dir)
+        _write([record], out_dir=out_dir)
     return record
 
 
@@ -67,24 +67,31 @@ def run(
 ) -> Iterator[dict]:
     """Yield one record per company. A per-company error becomes an ``upstream_failed`` record;
     only a company-id collision aborts the batch."""
+    accumulated_records = []
     for cid in company_ids:
         try:
-            yield process(
+            record = process(
                 cid,
                 out_dir=out_dir,
-                write=write,
+                write=False,
                 fact_dir=fact_dir,
                 scoring_dir=scoring_dir,
                 tagline_dir=tagline_dir,
                 translation_dir=translation_dir,
                 geocoding_dir=geocoding_dir,
             )
+            accumulated_records.append(record)
+            yield record
         except RuntimeError:
             raise  # company-id collision is the sole hard error
         except Exception as exc:
             failed = _empty_record(cid, status="upstream_failed")
             failed["_error"] = str(exc)
+            accumulated_records.append(failed)
             yield failed
+
+    if write:
+        _write(accumulated_records, out_dir=out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -233,20 +240,17 @@ def _load(path: Path) -> dict | None:
         return None
 
 
-def _write(record: dict, *, out_dir: Path) -> None:
-    cid = record.get("company_id")
-    if not isinstance(cid, str) or not cid:
-        return
+def _write(records: list[dict], *, out_dir: Path) -> None:
+    # Check for duplicate company_id values in the input list
+    seen_ids = set()
+    for record in records:
+        cid = record.get("company_id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        if cid in seen_ids:
+            raise RuntimeError(f"company-id collision: duplicate company_id {cid!r}")
+        seen_ids.add(cid)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{cid}.json"
-
-    if out_path.exists():
-        existing = json.loads(out_path.read_text(encoding="utf-8"))
-        if existing.get("name") != record.get("name"):
-            raise RuntimeError(
-                f"company-id collision at {out_path}: "
-                f"existing name={existing.get('name')!r}, new name={record.get('name')!r}"
-            )
-
-    out_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path = out_dir / "companies.json"
+    out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")

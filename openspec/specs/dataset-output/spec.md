@@ -139,12 +139,12 @@ The record SHALL exclude all non-frontend-facing data. It SHALL NOT contain page
 
 ### Requirement: Output Layout and Execution Model
 
-The stage SHALL write one file per company at `data/dataset-output/<company-id>.json` (single-file layout) and SHALL support the three execution modes: standalone CLI (`python -m pipeline.dataset_output`), an orchestrator-callable entry point with the same input/output contract, and a dry-run mode that performs all logic but writes nothing. Writing a record whose `company_id` collides with an existing file holding a different `name` SHALL raise (the sole permitted hard error).
+The stage SHALL write all projected company records into a single JSON file at `data/dataset-output/companies.json` containing a JSON list of company records, and SHALL support the three execution modes: standalone CLI (`python -m pipeline.dataset_output`), an orchestrator-callable entry point with the same input/output contract, and a dry-run mode that performs all logic but writes nothing. The stage SHALL raise a hard error if any duplicate `company_id` values appear in the final aggregated output list.
 
-#### Scenario: CLI writes one JSON per company
+#### Scenario: CLI writes single aggregated file
 
 - **WHEN** a developer runs `python -m pipeline.dataset_output` with the upstream directories populated
-- **THEN** each company's record is written to `data/dataset-output/<company-id>.json`
+- **THEN** all company records are aggregated and written to `data/dataset-output/companies.json` as a JSON array
 
 #### Scenario: Dry-run writes nothing
 
@@ -153,6 +153,6 @@ The stage SHALL write one file per company at `data/dataset-output/<company-id>.
 
 #### Scenario: Company-id collision refuses
 
-- **WHEN** an output file already exists for a `company_id` but holds a different `name`
-- **THEN** the stage raises rather than overwriting
+- **WHEN** the aggregated record list contains duplicate `company_id` values
+- **THEN** the stage raises a `RuntimeError` rather than writing
 
