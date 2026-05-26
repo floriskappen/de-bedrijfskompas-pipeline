@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Pipeline stage 3: extract a structured HQ address (`{street, postcode, city, country}`) per company from the `content-collection` output, using a regex-anchored fast path and a small-LLM fallback. The `status` field doubles as a resolution-path label so per-path accuracy is auditable downstream.
+Pipeline stage 3a: extract a structured HQ address (`{street, postcode, city, country}`) per company from the `content-collection` output, using a regex-anchored fast path and a small-LLM fallback. The `status` field doubles as a resolution-path label so per-path accuracy is auditable downstream.
 
 ## Requirements
 

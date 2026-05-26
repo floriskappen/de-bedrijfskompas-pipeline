@@ -25,6 +25,7 @@ from pipeline.website_resolution import company_id
 def dirs(tmp_path: Path) -> dict[str, Path]:
     d = {
         "fact_dir": tmp_path / "fact-extraction",
+        "geocoding_dir": tmp_path / "geocoding",
         "scoring_dir": tmp_path / "global-scoring",
         "tagline_dir": tmp_path / "tagline-extraction",
         "translation_dir": tmp_path / "translation",
@@ -77,6 +78,7 @@ def _translation(name: str = "Acme B.V.", *, status: str = "ok", include_tagline
 
 def _full(dirs: dict[str, Path], cid: str = "acme", name: str = "Acme B.V.", **scoring_kw) -> None:
     _write(dirs["fact_dir"], cid, _fact(name, address=_ADDRESS))
+    _write(dirs["geocoding_dir"], cid, {"name": name, "status": "ok", "latlng": {"lat": 52.0, "lng": 5.0}, "match_quality": "exact"})
     _write(dirs["scoring_dir"], cid, _scoring(name, **scoring_kw))
     _write(dirs["tagline_dir"], cid, _tagline(name))
     _write(dirs["translation_dir"], cid, _translation(name))
@@ -91,6 +93,7 @@ def _proc(dirs: dict[str, Path], cid: str, *, write: bool = False) -> dict:
         scoring_dir=dirs["scoring_dir"],
         tagline_dir=dirs["tagline_dir"],
         translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
     )
 
 
@@ -125,7 +128,8 @@ def test_one_record_per_spine_file(dirs):
     records = list(
         run(["a", "b", "c"], out_dir=dirs["out_dir"], write=False,
             fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-            tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"])
+            tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+            geocoding_dir=dirs["geocoding_dir"])
     )
     assert {r["company_id"] for r in records} == {"a", "b", "c"}
 
@@ -291,7 +295,8 @@ def test_cli_writes_one_json_per_company(dirs):
     _full(dirs, "acme")
     list(run(["acme"], out_dir=dirs["out_dir"], write=True,
              fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-             tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"]))
+             tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+             geocoding_dir=dirs["geocoding_dir"]))
     out = dirs["out_dir"] / "acme.json"
     assert out.exists()
     assert json.loads(out.read_text())["company_id"] == "acme"
@@ -331,6 +336,59 @@ def test_one_failure_does_not_abort_batch(dirs, monkeypatch):
     records = {r["company_id"]: r for r in run(
         ["good", "bad"], out_dir=dirs["out_dir"], write=False,
         fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-        tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"])}
+        tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"])}
     assert records["good"]["status"] == "ok"
     assert records["bad"]["status"] == "upstream_failed"
+
+
+# ---------------------------------------------------------------------------
+# Geocoding Integration Tests
+# ---------------------------------------------------------------------------
+
+
+def test_dataset_output_fully_populated_includes_latlng(dirs):
+    """Scenario: Fully populated record."""
+    _full(dirs, "acme", name="Acme B.V.")
+    rec = _proc(dirs, "acme")
+    assert rec["latlng"] == {"lat": 52.0, "lng": 5.0}
+    assert rec["match_quality"] == "exact"
+
+
+def test_dataset_output_latlng_match_quality_move_together(dirs):
+    """Scenario: latlng and match_quality move together."""
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V.", address=_ADDRESS))
+    _write(dirs["geocoding_dir"], "acme", {"name": "Acme B.V.", "status": "ok", "latlng": None, "match_quality": "exact"})
+    rec = _proc(dirs, "acme")
+    assert rec["latlng"] is None
+    assert rec["match_quality"] is None
+
+
+def test_dataset_output_geocoding_non_success_nulls_block(dirs):
+    """Scenario: Geocoding non-success nulls the latlng block."""
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V.", address=_ADDRESS))
+    _write(dirs["geocoding_dir"], "acme", {"name": "Acme B.V.", "status": "empty", "latlng": {"lat": 52.0, "lng": 5.0}, "match_quality": "exact"})
+    rec = _proc(dirs, "acme")
+    assert rec["latlng"] is None
+    assert rec["match_quality"] is None
+
+
+def test_dataset_output_latlng_alone_is_ok(dirs):
+    """Scenario: Latlng alone is ok."""
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V."))
+    _write(dirs["geocoding_dir"], "acme", {"name": "Acme B.V.", "status": "ok", "latlng": {"lat": 52.0, "lng": 5.0}, "match_quality": "exact"})
+    rec = _proc(dirs, "acme")
+    assert rec["status"] == "ok"
+    assert rec["latlng"] == {"lat": 52.0, "lng": 5.0}
+    assert rec["match_quality"] == "exact"
+
+
+def test_dataset_output_shell_company_empty_with_latlng_null(dirs):
+    """Scenario: Shell company is empty."""
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V.", status="empty"))
+    _write(dirs["geocoding_dir"], "acme", {"name": "Acme B.V.", "status": "empty", "latlng": None, "match_quality": None})
+    rec = _proc(dirs, "acme")
+    assert rec["status"] == "empty"
+    assert rec["latlng"] is None
+    assert rec["match_quality"] is None
+

@@ -65,7 +65,7 @@ Matching is path-prefix, case-insensitive, trailing-slash-insensitive. Hard cap:
 
 ## Footer capture
 
-`trafilatura` intentionally strips footers as boilerplate, but footers commonly hold structured facts (HQ address, postcode, Chamber of Commerce numbers). The stage extracts the homepage's `<footer>` text separately into `_meta.json.footer_text` so `fact-extraction` (stage 3) can use it.
+`trafilatura` intentionally strips footers as boilerplate, but footers commonly hold structured facts (HQ address, postcode, Chamber of Commerce numbers). The stage extracts the homepage's `<footer>` text separately into `_meta.json.footer_text` so `fact-extraction` (stage 3a) can use it.
 
 ## Tests
 

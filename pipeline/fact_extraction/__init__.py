@@ -1,1 +1,1 @@
-"""Pipeline stage 3: extract structured facts (HQ address) from content-collection output."""
+"""Pipeline stage 3a: extract structured facts (HQ address) from content-collection output."""

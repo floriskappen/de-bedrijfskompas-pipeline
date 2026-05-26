@@ -1,4 +1,4 @@
-"""Pipeline stage 5: tagline-extraction.
+"""Pipeline stage 4b: tagline-extraction.
 
 Reads one company's de-marketed dossier from ``data/content-summarization/<id>.md``
 and writes a single JSON record to ``data/tagline-extraction/<id>.json`` carrying an

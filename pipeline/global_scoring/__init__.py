@@ -1,4 +1,4 @@
-"""Pipeline stage 5: global-scoring.
+"""Pipeline stage 4c: global-scoring.
 
 Reads one company's de-marketed dossier from ``data/content-summarization/<id>.md``
 and writes a single JSON record to ``data/global-scoring/<id>.json`` carrying a score

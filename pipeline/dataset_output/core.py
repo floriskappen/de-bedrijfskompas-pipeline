@@ -12,6 +12,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 FACT_DIR = Path("data/fact-extraction")
+GEOCODING_DIR = Path("data/geocoding")
 SCORING_DIR = Path("data/global-scoring")
 TAGLINE_DIR = Path("data/tagline-extraction")
 TRANSLATION_DIR = Path("data/translation")
@@ -38,14 +39,16 @@ def process(
     scoring_dir: Path = SCORING_DIR,
     tagline_dir: Path = TAGLINE_DIR,
     translation_dir: Path = TRANSLATION_DIR,
+    geocoding_dir: Path = GEOCODING_DIR,
 ) -> dict:
     """Project one company's per-stage outputs into a single record. Raises only on id collision."""
     fact = _load(fact_dir / f"{cid}.json")
     scoring = _load(scoring_dir / f"{cid}.json")
     tagline = _load(tagline_dir / f"{cid}.json")
     translation = _load(translation_dir / f"{cid}.json")
+    geocoding = _load(geocoding_dir / f"{cid}.json")
 
-    record = _assemble(cid, fact, scoring, tagline, translation)
+    record = _assemble(cid, fact, scoring, tagline, translation, geocoding)
     if write:
         _write(record, out_dir=out_dir)
     return record
@@ -60,6 +63,7 @@ def run(
     scoring_dir: Path = SCORING_DIR,
     tagline_dir: Path = TAGLINE_DIR,
     translation_dir: Path = TRANSLATION_DIR,
+    geocoding_dir: Path = GEOCODING_DIR,
 ) -> Iterator[dict]:
     """Yield one record per company. A per-company error becomes an ``upstream_failed`` record;
     only a company-id collision aborts the batch."""
@@ -73,6 +77,7 @@ def run(
                 scoring_dir=scoring_dir,
                 tagline_dir=tagline_dir,
                 translation_dir=translation_dir,
+                geocoding_dir=geocoding_dir,
             )
         except RuntimeError:
             raise  # company-id collision is the sole hard error
@@ -87,17 +92,25 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _assemble(cid: str, fact: dict | None, scoring: dict | None, tagline: dict | None, translation: dict | None) -> dict:
+def _assemble(
+    cid: str,
+    fact: dict | None,
+    scoring: dict | None,
+    tagline: dict | None,
+    translation: dict | None,
+    geocoding: dict | None,
+) -> dict:
     name = (fact or {}).get("name")
     website = (fact or {}).get("website")
 
     address = _project_address(fact)
+    latlng, match_quality = _project_geocoding(geocoding)
     scores, en_scores = _project_scores(scoring)
     en_tagline = _project_tagline(tagline)
     en_tree = _en_tree(en_scores, en_tagline, has_scoring=scores is not None, has_tagline=_usable(tagline))
     nl_tree = _nl_tree(translation, mirror_scores=en_scores is not None)
 
-    status = _status(fact, address=address, scores=scores, en_tree=en_tree, nl_tree=nl_tree)
+    status = _status(fact, address=address, latlng=latlng, scores=scores, en_tree=en_tree, nl_tree=nl_tree)
 
     return {
         "company_id": cid,
@@ -105,6 +118,8 @@ def _assemble(cid: str, fact: dict | None, scoring: dict | None, tagline: dict |
         "website": website,
         "status": status,
         "address": address,
+        "latlng": latlng,
+        "match_quality": match_quality,
         "scores": scores,
         "en": en_tree,
         "nl": nl_tree,
@@ -160,10 +175,26 @@ def _nl_tree(translation: dict | None, *, mirror_scores: bool) -> dict | None:
     return {"tagline": (tr.get("tagline") or {}).get("nl"), "scores": nl_scores}
 
 
-def _status(fact: dict | None, *, address, scores, en_tree, nl_tree) -> str:
+def _project_geocoding(geocoding: dict | None) -> tuple[dict | None, str | None]:
+    if not geocoding or geocoding.get("status") != "ok":
+        return None, None
+    latlng = geocoding.get("latlng")
+    match_quality = geocoding.get("match_quality")
+    if not latlng or not match_quality:
+        return None, None
+    return latlng, match_quality
+
+
+def _status(fact: dict | None, *, address, latlng, scores, en_tree, nl_tree) -> str:
     if fact is None:
         return "upstream_failed"
-    has_payload = address is not None or scores is not None or en_tree is not None or nl_tree is not None
+    has_payload = (
+        address is not None or
+        latlng is not None or
+        scores is not None or
+        en_tree is not None or
+        nl_tree is not None
+    )
     return "ok" if has_payload else "empty"
 
 
@@ -179,6 +210,8 @@ def _empty_record(cid: str, *, status: str) -> dict:
         "website": None,
         "status": status,
         "address": None,
+        "latlng": None,
+        "match_quality": None,
         "scores": None,
         "en": None,
         "nl": None,
