@@ -66,6 +66,7 @@ def process(
 
     homepage_html = homepage_result.html or ""
     footer_text = extract.extract_footer_text(homepage_html)
+    favicon_url = extract.extract_favicon_url(homepage_url, homepage_html)
     recall_pages: dict[str, str] = {}
 
     links = crawl.extract_internal_links(homepage_url, homepage_html)
@@ -159,6 +160,7 @@ def process(
     meta["sitemap_consulted"] = sitemap_consulted
     meta["sitemap_url"] = sitemap_used_url
     meta["sitemap_urls_found"] = sitemap_urls_found
+    meta["favicon_url"] = favicon_url
 
     if write:
         _write_company(meta, pages=pages_written, recall_pages=recall_pages, out_dir=out_dir)
@@ -201,6 +203,7 @@ def _meta_skeleton(record: dict, *, status: str) -> dict:
     out["sitemap_consulted"] = False
     out["sitemap_url"] = None
     out["sitemap_urls_found"] = 0
+    out["favicon_url"] = None
     return out
 
 

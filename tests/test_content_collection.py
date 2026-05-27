@@ -14,7 +14,7 @@ from pipeline.content_collection.crawl import (
     select_urls,
     slugify_path,
 )
-from pipeline.content_collection.extract import extract_footer_text
+from pipeline.content_collection.extract import extract_footer_text, extract_favicon_url
 from pipeline.content_collection.fetch import FetchResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -266,6 +266,92 @@ def test_footer_block_boundaries_preserved() -> None:
     assert "LinkedIn" in out and "Instagram" in out
 
 
+def test_favicon_url_ranking_and_selection() -> None:
+    # 1. Preferred exact size 512x512
+    html = """
+    <html>
+      <head>
+        <link rel="icon" href="/favicon-16.png" sizes="16x16">
+        <link rel="icon" href="/favicon-192.png" sizes="192x192">
+        <link rel="icon" href="/favicon-512.png" sizes="512x512">
+        <link rel="shortcut icon" href="/favicon.ico">
+      </head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon-512.png"
+
+    # 2. Preferred larger sizes >= 512, choosing the smallest among them (closest to 512)
+    html = """
+    <html>
+      <head>
+        <link rel="icon" href="/favicon-1024.png" sizes="1024x1024">
+        <link rel="icon" href="/favicon-2048.png" sizes="2048x2048">
+      </head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon-1024.png"
+
+    # 3. Preferred largest size < 512 when no sizes >= 512 exist
+    html = """
+    <html>
+      <head>
+        <link rel="icon" href="/favicon-16.png" sizes="16x16">
+        <link rel="icon" href="/favicon-192.png" sizes="192x192">
+        <link rel="icon" href="/favicon-32.png" sizes="32x32">
+      </head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon-192.png"
+
+    # 4. Sizes="any" treated as 512
+    html = """
+    <html>
+      <head>
+        <link rel="icon" href="/favicon-any.svg" sizes="any">
+        <link rel="icon" href="/favicon-192.png" sizes="192x192">
+      </head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon-any.svg"
+
+    # 5. Tie-breaker prefers modern icon/apple-touch-icon over shortcut icon
+    html = """
+    <html>
+      <head>
+        <link rel="shortcut icon" href="/favicon-legacy.png" sizes="192x192">
+        <link rel="apple-touch-icon" href="/favicon-modern.png" sizes="192x192">
+      </head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon-modern.png"
+
+
+def test_favicon_fallback_and_null_status() -> None:
+    # No link tags -> fallback to favicon.ico
+    html = """
+    <html>
+      <head></head>
+      <body></body>
+    </html>
+    """
+    url = extract_favicon_url("https://acme.example", html)
+    assert url == "https://acme.example/favicon.ico"
+
+    # Invalid HTML / parsing error -> fallback to favicon.ico
+    url = extract_favicon_url("https://acme.example", "invalid html < < <")
+    assert url == "https://acme.example/favicon.ico"
+
+
 # ---------------------------------------------------------------------------
 # core.process — end-to-end with mocked fetch
 # ---------------------------------------------------------------------------
@@ -327,6 +413,7 @@ def test_process_ok_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_s
     assert meta["pages_collected"] == 4
     assert meta["source"] == "test"
     assert meta["footer_text"] and "Europalaan" in meta["footer_text"]
+    assert meta["favicon_url"] == base + "/favicon.ico"
     statuses = {a["status"] for a in meta["urls_attempted"]}
     assert "written" in statuses
     # Files on disk:

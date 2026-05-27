@@ -397,3 +397,16 @@ def test_dataset_output_shell_company_empty_with_latlng_null(dirs):
     assert rec["latlng"] is None
     assert rec["match_quality"] is None
 
+
+def test_dataset_output_includes_favicon_url(dirs):
+    """Scenario: Fully populated record (verifying favicon_url)."""
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V.", favicon_url="https://acme.example/logo.png"))
+    rec = _proc(dirs, "acme")
+    assert rec["favicon_url"] == "https://acme.example/logo.png"
+
+    # Verify that it is null if not provided
+    _write(dirs["fact_dir"], "acme", _fact("Acme B.V."))
+    rec = _proc(dirs, "acme")
+    assert rec["favicon_url"] is None
+
+

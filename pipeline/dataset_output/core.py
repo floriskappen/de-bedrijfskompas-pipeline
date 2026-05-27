@@ -109,6 +109,7 @@ def _assemble(
 ) -> dict:
     name = (fact or {}).get("name")
     website = (fact or {}).get("website")
+    favicon_url = (fact or {}).get("favicon_url")
 
     address = _project_address(fact)
     latlng, match_quality = _project_geocoding(geocoding)
@@ -123,6 +124,7 @@ def _assemble(
         "company_id": cid,
         "name": name,
         "website": website,
+        "favicon_url": favicon_url,
         "status": status,
         "address": address,
         "latlng": latlng,
@@ -215,6 +217,7 @@ def _empty_record(cid: str, *, status: str) -> dict:
         "company_id": cid,
         "name": None,
         "website": None,
+        "favicon_url": None,
         "status": status,
         "address": None,
         "latlng": None,

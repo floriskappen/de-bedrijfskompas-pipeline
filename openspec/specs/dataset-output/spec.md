@@ -36,7 +36,7 @@ The stage SHALL emit exactly one output record for each company that has a `data
 
 Each record SHALL be a JSON object whose language-neutral data lives at the root and whose translatable text lives under per-locale trees. The five score axes are `substance`, `ecology`, `power`, `embeddedness`, `posture`. The locales are `en` and `nl`. The shape is:
 
-- Root: `company_id`, `name`, `website`, `status`, `address` (object with `street`, `postcode`, `city`, `country`, or `null`), `latlng` (object with `lat` and `lng`, or `null`), `match_quality` (one of `exact`, `postcode_centroid`, `city_centroid`, or `null`), and `scores` (object mapping each axis to `{ score, evidence }`, or `null`).
+- Root: `company_id`, `name`, `website`, `favicon_url` (string or `null`), `status`, `address` (object with `street`, `postcode`, `city`, `country`, or `null`), `latlng` (object with `lat` and `lng`, or `null`), `match_quality` (one of `exact`, `postcode_centroid`, `city_centroid`, or `null`), and `scores` (object mapping each axis to `{ score, evidence }`, or `null`).
 - `en` / `nl`: each an object `{ tagline, scores }`, where `scores` maps each axis to `{ reason }`; or `null`.
 
 `company_id` SHALL equal the record's filename stem and be derived from `name` via the shared `company_id` helper. Axis `score` is an integer or `null`; `evidence` is one of `well_evidenced`, `partial`, `no_signal` passed through verbatim from global-scoring. `latlng.lat` and `latlng.lng` are WGS84 decimal-degree floats; `latlng` and `match_quality` are non-null together or null together.
@@ -56,6 +56,7 @@ Each record SHALL be a JSON object whose language-neutral data lives at the root
 Each output field SHALL be sourced from exactly the following upstream field; the stage performs no other transformation than copying and renaming:
 
 - `name`, `website` ← fact-extraction `name`, `website`
+- `favicon_url` ← fact-extraction `favicon_url` when present and non-null, else `null`
 - `address` ← fact-extraction `address` (the whole object) when present and non-null, else `null`
 - `latlng` ← geocoding `latlng` (the whole object) when present and non-null, else `null`
 - `match_quality` ← geocoding `match_quality` when present and non-null, else `null`

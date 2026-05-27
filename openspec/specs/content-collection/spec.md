@@ -170,6 +170,7 @@ For each company processed (successfully or not), the stage SHALL produce `data/
 - `sitemap_consulted`: boolean. `false` only when the homepage was not reachable.
 - `sitemap_url`: string or `null` — the sitemap actually used.
 - `sitemap_urls_found`: integer — count of `<loc>` URLs harvested before tier filtering.
+- `favicon_url`: string or `null` — the extracted or fallback favicon URL.
 
 #### Scenario: Successful company with three pages
 
@@ -279,3 +280,18 @@ The implementation SHALL handle these non-obvious environmental and library-quir
 
 - **WHEN** `/sitemap.xml` returns `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">...<url><loc>https://acme.example/about</loc></url>...</urlset>`
 - **THEN** `https://acme.example/about` is harvested into the candidate pool
+
+### Requirement: Favicon URL Extraction
+
+The stage SHALL extract a favicon URL from the homepage HTML. It SHALL parse `<link>` tags with `rel` values in `("icon", "shortcut icon", "apple-touch-icon", "apple-touch-icon-precomposed")`. It SHALL choose the icon closest to the target size of 512x512 (preferring size $\ge 512$ sorted ascending, then size $< 512$ sorted descending), preferring modern `rel` types as a tie-breaker. If no `<link>` tag is found, it SHALL fall back to `<homepage_url>/favicon.ico`. If the homepage fetch fails, `favicon_url` SHALL be `null`.
+
+#### Scenario: Best candidate favicon URL selected
+
+- **WHEN** the homepage HTML contains candidate icons of sizes `16x16`, `192x192`, `1024x1024`, and `512x512`
+- **THEN** the absolute URL of the `512x512` icon is chosen
+
+#### Scenario: Fallback icon used
+
+- **WHEN** the homepage HTML contains no favicon links, or the homepage fetch fails
+- **THEN** `favicon_url` is `<homepage_url>/favicon.ico` or `null` respectively
+

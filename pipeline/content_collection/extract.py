@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Final
+from urllib.parse import urljoin
 
 import trafilatura
 from lxml import etree, html as lxml_html
@@ -85,6 +86,68 @@ def extract_page_metadata(html: str) -> dict:
         "description": data.get("description"),
         "sitename": data.get("sitename"),
     }
+
+
+_SIZE_RE = re.compile(r"(\d+)\s*[xX]\s*(\d+)")
+
+
+def extract_favicon_url(homepage_url: str, html: str) -> str | None:
+    """Extract the best favicon URL from homepage HTML."""
+    try:
+        doc = lxml_html.fromstring(html)
+    except (ValueError, lxml_html.etree.ParserError):
+        return urljoin(homepage_url, "/favicon.ico")
+
+    candidates = []
+    for link in doc.iter("link"):
+        rel = link.get("rel", "").lower().strip()
+        rel_tokens = set(rel.split())
+        is_favicon = (
+            rel in ("icon", "shortcut icon", "apple-touch-icon", "apple-touch-icon-precomposed")
+            or "icon" in rel_tokens
+            or "apple-touch-icon" in rel_tokens
+            or "apple-touch-icon-precomposed" in rel_tokens
+        )
+        if not is_favicon:
+            continue
+
+        href = link.get("href")
+        if not href:
+            continue
+
+        sizes_attr = link.get("sizes", "").lower().strip()
+        parsed_sizes = []
+
+        if sizes_attr == "any":
+            parsed_sizes.append(512)
+        elif sizes_attr:
+            for match in _SIZE_RE.finditer(sizes_attr):
+                w = int(match.group(1))
+                h = int(match.group(2))
+                parsed_sizes.append(max(w, h))
+
+        if not parsed_sizes:
+            parsed_sizes.append(16)
+
+        best_size = max(parsed_sizes)
+        rel_priority = 0 if "shortcut" not in rel else 1
+        abs_url = urljoin(homepage_url, href)
+        candidates.append((abs_url, best_size, rel_priority))
+
+    if not candidates:
+        return urljoin(homepage_url, "/favicon.ico")
+
+    larger_or_equal = [c for c in candidates if c[1] >= 512]
+    smaller = [c for c in candidates if c[1] < 512]
+
+    # Sort groups:
+    # larger_or_equal sorted by size ascending, then rel_priority ascending
+    larger_or_equal.sort(key=lambda c: (c[1], c[2]))
+    # smaller sorted by size descending, then rel_priority ascending
+    smaller.sort(key=lambda c: (-c[1], c[2]))
+
+    ranked = larger_or_equal + smaller
+    return ranked[0][0]
 
 
 def extract_footer_text(html: str) -> str | None:
