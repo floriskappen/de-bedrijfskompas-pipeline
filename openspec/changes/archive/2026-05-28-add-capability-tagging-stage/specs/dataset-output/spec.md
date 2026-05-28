@@ -1,8 +1,5 @@
-# dataset-output Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change implement-dataset-output. Update Purpose after archive.
-## Requirements
 ### Requirement: Input Sources
 
 The stage SHALL read its input as the per-company files written by upstream stages, one company at a time, and SHALL NOT call any LLM or perform any network request. The sources it reads are:
@@ -18,20 +15,6 @@ The stage SHALL read its input as the per-company files written by upstream stag
 
 - **WHEN** the stage processes any company
 - **THEN** it produces its record solely by reading upstream files and reshaping them, making no LLM call and no network request
-
-### Requirement: Company Enumeration
-
-The stage SHALL emit exactly one output record for each company that has a `data/fact-extraction/<company-id>.json` file (the enumeration spine). A company with no fact-extraction file SHALL NOT receive a record (it is "not yet run"). The other sources are left-joined: their absence reduces the record to nulls but never removes the company from the output.
-
-#### Scenario: One record per fact-extraction file
-
-- **WHEN** the stage runs over a `data/fact-extraction/` directory containing three companies
-- **THEN** it writes exactly three records, regardless of how many of those companies have scoring, tagline, or translation files
-
-#### Scenario: Company absent from the spine is not emitted
-
-- **WHEN** a company has a global-scoring file but no fact-extraction file
-- **THEN** the stage writes no record for that company
 
 ### Requirement: Output Record Shape
 
@@ -146,32 +129,3 @@ Status SHALL NOT be gated on any upstream stage's own internal status: a company
 
 - **WHEN** a company has a fact-extraction file but no address, no latlng, no scores, no tagline, and no capability tags
 - **THEN** the record has `status: "empty"` with all payload blocks null
-
-### Requirement: Excluded Content
-
-The record SHALL exclude all non-frontend-facing data. It SHALL NOT contain page HTML or markdown, the content-summarization dossier or any of its body, `footer_text`, `urls_attempted`, sitemap fields, per-stage `model` identifiers, or the intermediate per-stage `status` values of upstream stages.
-
-#### Scenario: Internal artefacts are dropped
-
-- **WHEN** a record is produced for a company whose fact-extraction file contains `footer_text`, `urls_attempted`, and sitemap fields
-- **THEN** none of those keys, nor any upstream `model` or upstream `status`, appear anywhere in the record
-
-### Requirement: Output Layout and Execution Model
-
-The stage SHALL write all projected company records into a single JSON file at `data/dataset-output/companies.json` containing a JSON list of company records, and SHALL support the three execution modes: standalone CLI (`python -m pipeline.dataset_output`), an orchestrator-callable entry point with the same input/output contract, and a dry-run mode that performs all logic but writes nothing. The stage SHALL raise a hard error if any duplicate `company_id` values appear in the final aggregated output list.
-
-#### Scenario: CLI writes single aggregated file
-
-- **WHEN** a developer runs `python -m pipeline.dataset_output` with the upstream directories populated
-- **THEN** all company records are aggregated and written to `data/dataset-output/companies.json` as a JSON array
-
-#### Scenario: Dry-run writes nothing
-
-- **WHEN** the stage runs in dry-run mode
-- **THEN** it produces the same records in memory but writes no file under `data/dataset-output/`
-
-#### Scenario: Company-id collision refuses
-
-- **WHEN** the aggregated record list contains duplicate `company_id` values
-- **THEN** the stage raises a `RuntimeError` rather than writing
-

@@ -253,6 +253,7 @@ def _summarise(cid: str) -> dict:
         pytest.skip(f"{cid} not present in content-collection output")
     meta = json.loads((company_dir / "_meta.json").read_text(encoding="utf-8"))
     _, pages = core_module._load_company(meta, content_dir=CONTENT_DIR)
+    meta["status"] = "ok"
     return process(meta, pages, out_dir=Path("/nonexistent"), write=False)
 
 

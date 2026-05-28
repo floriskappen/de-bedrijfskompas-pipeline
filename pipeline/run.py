@@ -150,6 +150,16 @@ def _drive_global_scoring(*, resume: bool, data_root: Path) -> None:
     list(run(records, write=True, out_dir=out_dir, content_dir=content_dir))
 
 
+def _drive_tagging(*, resume: bool, data_root: Path) -> None:
+    from pipeline.tagging.core import run
+
+    content_dir = data_root / "content-summarization"
+    out_dir = data_root / "tagging"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records = _load_dossier_records(content_dir, out_dir, resume=resume)
+    list(run(records, write=True, out_dir=out_dir, content_dir=content_dir))
+
+
 def _drive_translation(*, resume: bool, data_root: Path) -> None:
     from pipeline.translation.core import run
     from pipeline.translation.llm import TRANSLATION_TARGETS
@@ -206,6 +216,7 @@ def _drive_dataset_output(*, resume: bool, data_root: Path) -> None:
             fact_dir=fact_dir,
             scoring_dir=data_root / "global-scoring",
             tagline_dir=data_root / "tagline-extraction",
+            tagging_dir=data_root / "tagging",
             translation_dir=data_root / "translation",
             geocoding_dir=data_root / "geocoding",
         )
@@ -299,6 +310,7 @@ STAGES: list[tuple[str, StageDriver]] = [
     ("geocoding", lambda seed, *, resume, data_root: _drive_geocoding(resume=resume, data_root=data_root)),
     ("tagline-extraction", lambda seed, *, resume, data_root: _drive_tagline_extraction(resume=resume, data_root=data_root)),
     ("global-scoring", lambda seed, *, resume, data_root: _drive_global_scoring(resume=resume, data_root=data_root)),
+    ("tagging", lambda seed, *, resume, data_root: _drive_tagging(resume=resume, data_root=data_root)),
     ("translation", lambda seed, *, resume, data_root: _drive_translation(resume=resume, data_root=data_root)),
     ("dataset-output", lambda seed, *, resume, data_root: _drive_dataset_output(resume=resume, data_root=data_root)),
 ]

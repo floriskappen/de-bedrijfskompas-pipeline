@@ -176,6 +176,7 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list]]:
     monkeypatch.setattr(
         "pipeline.global_scoring.core.run", _record_single_file("global-scoring")
     )
+    monkeypatch.setattr("pipeline.tagging.core.run", _record_single_file("tagging"))
     monkeypatch.setattr("pipeline.translation.core.run", _record_translation())
     monkeypatch.setattr("pipeline.dataset_output.core.run", _record_dataset_output())
 
@@ -294,6 +295,7 @@ def test_run_default_reprocesses_everything(
         "geocoding",
         "tagline-extraction",
         "global-scoring",
+        "tagging",
         "translation",
     ):
         d = tmp_path / stage

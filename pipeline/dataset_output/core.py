@@ -15,6 +15,7 @@ FACT_DIR = Path("data/fact-extraction")
 GEOCODING_DIR = Path("data/geocoding")
 SCORING_DIR = Path("data/global-scoring")
 TAGLINE_DIR = Path("data/tagline-extraction")
+TAGGING_DIR = Path("data/tagging")
 TRANSLATION_DIR = Path("data/translation")
 DEFAULT_OUT_DIR = Path("data/dataset-output")
 
@@ -38,6 +39,7 @@ def process(
     fact_dir: Path = FACT_DIR,
     scoring_dir: Path = SCORING_DIR,
     tagline_dir: Path = TAGLINE_DIR,
+    tagging_dir: Path = TAGGING_DIR,
     translation_dir: Path = TRANSLATION_DIR,
     geocoding_dir: Path = GEOCODING_DIR,
 ) -> dict:
@@ -45,10 +47,11 @@ def process(
     fact = _load(fact_dir / f"{cid}.json")
     scoring = _load(scoring_dir / f"{cid}.json")
     tagline = _load(tagline_dir / f"{cid}.json")
+    tagging = _load(tagging_dir / f"{cid}.json")
     translation = _load(translation_dir / f"{cid}.json")
     geocoding = _load(geocoding_dir / f"{cid}.json")
 
-    record = _assemble(cid, fact, scoring, tagline, translation, geocoding)
+    record = _assemble(cid, fact, scoring, tagline, tagging, translation, geocoding)
     if write:
         _write([record], out_dir=out_dir)
     return record
@@ -62,6 +65,7 @@ def run(
     fact_dir: Path = FACT_DIR,
     scoring_dir: Path = SCORING_DIR,
     tagline_dir: Path = TAGLINE_DIR,
+    tagging_dir: Path = TAGGING_DIR,
     translation_dir: Path = TRANSLATION_DIR,
     geocoding_dir: Path = GEOCODING_DIR,
 ) -> Iterator[dict]:
@@ -77,6 +81,7 @@ def run(
                 fact_dir=fact_dir,
                 scoring_dir=scoring_dir,
                 tagline_dir=tagline_dir,
+                tagging_dir=tagging_dir,
                 translation_dir=translation_dir,
                 geocoding_dir=geocoding_dir,
             )
@@ -104,6 +109,7 @@ def _assemble(
     fact: dict | None,
     scoring: dict | None,
     tagline: dict | None,
+    tagging: dict | None,
     translation: dict | None,
     geocoding: dict | None,
 ) -> dict:
@@ -115,10 +121,19 @@ def _assemble(
     latlng, match_quality = _project_geocoding(geocoding)
     scores, en_scores = _project_scores(scoring)
     en_tagline = _project_tagline(tagline)
+    capability_tags = _project_capability_tags(tagging)
     en_tree = _en_tree(en_scores, en_tagline, has_scoring=scores is not None, has_tagline=_usable(tagline))
     nl_tree = _nl_tree(translation, mirror_scores=en_scores is not None)
 
-    status = _status(fact, address=address, latlng=latlng, scores=scores, en_tree=en_tree, nl_tree=nl_tree)
+    status = _status(
+        fact,
+        address=address,
+        latlng=latlng,
+        scores=scores,
+        capability_tags=capability_tags,
+        en_tree=en_tree,
+        nl_tree=nl_tree,
+    )
 
     return {
         "company_id": cid,
@@ -130,9 +145,24 @@ def _assemble(
         "latlng": latlng,
         "match_quality": match_quality,
         "scores": scores,
+        "capability_tags": capability_tags,
         "en": en_tree,
         "nl": nl_tree,
     }
+
+
+def _project_capability_tags(tagging: dict | None) -> list[dict] | None:
+    """Pass tagging's ``capability_tags`` array through verbatim, or null when source is unusable.
+
+    An empty array is distinct from null: it means tagging ran successfully but
+    emitted no applicable capabilities.
+    """
+    if not _usable(tagging):
+        return None
+    tags = tagging.get("capability_tags")
+    if not isinstance(tags, list):
+        return None
+    return tags
 
 
 def _project_address(fact: dict | None) -> dict | None:
@@ -194,13 +224,14 @@ def _project_geocoding(geocoding: dict | None) -> tuple[dict | None, str | None]
     return latlng, match_quality
 
 
-def _status(fact: dict | None, *, address, latlng, scores, en_tree, nl_tree) -> str:
+def _status(fact: dict | None, *, address, latlng, scores, capability_tags, en_tree, nl_tree) -> str:
     if fact is None:
         return "upstream_failed"
     has_payload = (
         address is not None or
         latlng is not None or
         scores is not None or
+        capability_tags is not None or
         en_tree is not None or
         nl_tree is not None
     )
@@ -223,6 +254,7 @@ def _empty_record(cid: str, *, status: str) -> dict:
         "latlng": None,
         "match_quality": None,
         "scores": None,
+        "capability_tags": None,
         "en": None,
         "nl": None,
     }
