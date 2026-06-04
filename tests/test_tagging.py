@@ -16,14 +16,14 @@ import pytest
 from pipeline.tagging import core as core_module
 from pipeline.tagging import frontmatter, llm as llm_module
 from pipeline.tagging.core import load_prompt, process, run
-from pipeline.tagging.llm import FAMILIES, LLMError
+from pipeline.tagging.llm import ISCO_MINOR_GROUPS, LLMError
 from pipeline.website_resolution import company_id
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _TAGS = [
-    {"family": "software-engineering", "prominence": "core"},
-    {"family": "commercial", "prominence": "supporting"},
+    {"isco_code": "251", "prominence": "core", "confidence": "high"},
+    {"isco_code": "243", "prominence": "supporting", "confidence": "high"},
 ]
 
 
@@ -135,44 +135,46 @@ def _post_returning(content: str):
     return lambda url, **kw: _FakeResp(content)
 
 
-def test_emitted_family_in_fixed_set() -> None:
-    """Scenario: Emitted family is in the fixed set."""
-    payload = json.dumps({"capability_tags": [{"family": "data-ai", "prominence": "core"}]})
+def test_emitted_isco_code_in_fixed_set() -> None:
+    """Scenario: Emitted ISCO code is in the fixed set."""
+    payload = json.dumps({"capability_tags": [{"isco_code": "251", "prominence": "core", "confidence": "high"}]})
     with patch.object(llm_module.httpx, "post", _post_returning(payload)):
         tags = llm_module.call([{"role": "user", "content": "hi"}])
-    assert tags == [{"family": "data-ai", "prominence": "core"}]
-    assert all(t["family"] in FAMILIES for t in tags)
+    assert tags == [{"isco_code": "251", "prominence": "core", "confidence": "high"}]
+    assert all(t["isco_code"] in ISCO_MINOR_GROUPS for t in tags)
+    assert len(ISCO_MINOR_GROUPS) == 130
 
 
-def test_out_of_vocab_family_is_llm_error() -> None:
-    """Scenario: Out-of-vocabulary family is treated as LLM error."""
-    payload = json.dumps({"capability_tags": [{"family": "made-up-thing", "prominence": "core"}]})
+def test_out_of_vocab_isco_code_is_llm_error() -> None:
+    """Scenario: Out-of-vocabulary ISCO code is treated as LLM error."""
+    payload = json.dumps({"capability_tags": [{"isco_code": "999", "prominence": "core", "confidence": "high"}]})
     with patch.object(llm_module.httpx, "post", _post_returning(payload)):
         with pytest.raises(LLMError):
             llm_module.call([{"role": "user", "content": "hi"}])
 
 
-def test_tag_has_family_and_prominence() -> None:
-    """Scenario: Tag carries family and prominence."""
+def test_tag_has_isco_code_prominence_confidence() -> None:
+    """Scenario: Tag carries ISCO code, prominence, and confidence."""
     payload = json.dumps({
         "capability_tags": [
-            {"family": "software-engineering", "prominence": "core"},
-            {"family": "commercial", "prominence": "supporting"},
+            {"isco_code": "251", "prominence": "core", "confidence": "high"},
+            {"isco_code": "243", "prominence": "supporting", "confidence": "low"},
         ]
     })
     with patch.object(llm_module.httpx, "post", _post_returning(payload)):
         tags = llm_module.call([{"role": "user", "content": "hi"}])
     for entry in tags:
-        assert set(entry.keys()) == {"family", "prominence"}
+        assert set(entry.keys()) == {"isco_code", "prominence", "confidence"}
         assert entry["prominence"] in {"core", "supporting", "incidental"}
+        assert entry["confidence"] in {"high", "low"}
 
 
-def test_duplicate_family_is_llm_error() -> None:
-    """Scenario: One entry per family."""
+def test_duplicate_isco_code_is_llm_error() -> None:
+    """Scenario: One entry per ISCO code."""
     payload = json.dumps({
         "capability_tags": [
-            {"family": "data-ai", "prominence": "core"},
-            {"family": "data-ai", "prominence": "supporting"},
+            {"isco_code": "251", "prominence": "core", "confidence": "high"},
+            {"isco_code": "251", "prominence": "supporting", "confidence": "low"},
         ]
     })
     with patch.object(llm_module.httpx, "post", _post_returning(payload)):
@@ -182,7 +184,15 @@ def test_duplicate_family_is_llm_error() -> None:
 
 def test_invalid_prominence_is_llm_error() -> None:
     """Scenario: Invalid prominence is an LLM error."""
-    payload = json.dumps({"capability_tags": [{"family": "data-ai", "prominence": "central"}]})
+    payload = json.dumps({"capability_tags": [{"isco_code": "251", "prominence": "central", "confidence": "high"}]})
+    with patch.object(llm_module.httpx, "post", _post_returning(payload)):
+        with pytest.raises(LLMError):
+            llm_module.call([{"role": "user", "content": "hi"}])
+
+
+def test_invalid_confidence_is_llm_error() -> None:
+    """Scenario: Invalid confidence is an LLM error."""
+    payload = json.dumps({"capability_tags": [{"isco_code": "251", "prominence": "core", "confidence": "medium"}]})
     with patch.object(llm_module.httpx, "post", _post_returning(payload)):
         with pytest.raises(LLMError):
             llm_module.call([{"role": "user", "content": "hi"}])
@@ -280,6 +290,26 @@ def test_prompt_loaded_from_file() -> None:
     expected = (REPO_ROOT / "prompts" / "tagging.md").read_text(encoding="utf-8")
     assert load_prompt() == expected
     assert "capability_tags" in load_prompt()
+    assert "isco_code" in load_prompt()
+    assert "confidence" in load_prompt()
+    assert "251 Software and applications developers and analysts" in load_prompt()
+    assert "532 Personal care workers in health services" in load_prompt()
+    assert "833 Heavy truck and bus drivers" in load_prompt()
+
+
+def test_serving_sector_not_staffing_sector_prompt_rule() -> None:
+    prompt = load_prompt()
+    assert "Serving a sector is not staffing that sector" in prompt
+    assert "hospital tools" in prompt
+    assert "`251` or `252`" in prompt
+    assert "`221`, `222`, `321`, `322`, or `532`" in prompt
+
+
+def test_ordinary_business_functions_omitted_prompt_rule() -> None:
+    prompt = load_prompt()
+    assert "Ordinary internal functions do not count by themselves" in prompt
+    assert "just because every company has some of it" in prompt
+    assert "what the company sells, delivers, or fundamentally operates" in prompt
 
 
 # ---------------------------------------------------------------------------

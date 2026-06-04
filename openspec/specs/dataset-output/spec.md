@@ -11,7 +11,7 @@ The stage SHALL read its input as the per-company files written by upstream stag
 - `data/geocoding/<company-id>.json` — carries `status`, `latlng` (`{ "lat", "lng" }` or `null`), and `match_quality` (`exact` / `postcode_centroid` / `city_centroid` / `null`).
 - `data/global-scoring/<company-id>.json` — carries `status` and `scores.<axis>.{score, evidence, reason.en}` for each axis.
 - `data/tagline-extraction/<company-id>.json` — carries `status` and `tagline.en`.
-- `data/tagging/<company-id>.json` — carries `status` and `capability_tags` (a list of `{ family, prominence }` objects, or `null`).
+- `data/tagging/<company-id>.json` — carries `status` and `capability_tags` (a list of `{ isco_code, prominence, confidence }` objects, or `null`).
 - `data/translation/<company-id>.json` — carries `status` and `translations`, a flat map keyed by dotted target path (`"tagline"`, `"scores.<axis>.reason"`) to `{ "nl": <text> }`.
 
 #### Scenario: No model calls
@@ -37,20 +37,20 @@ The stage SHALL emit exactly one output record for each company that has a `data
 
 Each record SHALL be a JSON object whose language-neutral data lives at the root and whose translatable text lives under per-locale trees. The five score axes are `substance`, `ecology`, `power`, `embeddedness`, `posture`. The locales are `en` and `nl`. The shape is:
 
-- Root: `company_id`, `name`, `website`, `favicon_url` (string or `null`), `status`, `address` (object with `street`, `postcode`, `city`, `country`, or `null`), `latlng` (object with `lat` and `lng`, or `null`), `match_quality` (one of `exact`, `postcode_centroid`, `city_centroid`, or `null`), `scores` (object mapping each axis to `{ score, evidence }`, or `null`), and `capability_tags` (a JSON array of `{ family, prominence }` objects, or `null`).
+- Root: `company_id`, `name`, `website`, `favicon_url` (string or `null`), `status`, `address` (object with `street`, `postcode`, `city`, `country`, or `null`), `latlng` (object with `lat` and `lng`, or `null`), `match_quality` (one of `exact`, `postcode_centroid`, `city_centroid`, or `null`), `scores` (object mapping each axis to `{ score, evidence }`, or `null`), and `capability_tags` (a JSON array of `{ isco_code, prominence, confidence }` objects, or `null`).
 - `en` / `nl`: each an object `{ tagline, scores }`, where `scores` maps each axis to `{ reason }`; or `null`.
 
-`company_id` SHALL equal the record's filename stem and be derived from `name` via the shared `company_id` helper. Axis `score` is an integer or `null`; `evidence` is one of `well_evidenced`, `partial`, `no_signal` passed through verbatim from global-scoring. `latlng.lat` and `latlng.lng` are WGS84 decimal-degree floats; `latlng` and `match_quality` are non-null together or null together. Each `capability_tags` entry has a `family` slug drawn from the fixed tagging vocabulary and a `prominence` of `core`, `supporting`, or `incidental`, passed through verbatim from tagging.
+`company_id` SHALL equal the record's filename stem and be derived from `name` via the shared `company_id` helper. Axis `score` is an integer or `null`; `evidence` is one of `well_evidenced`, `partial`, `no_signal` passed through verbatim from global-scoring. `latlng.lat` and `latlng.lng` are WGS84 decimal-degree floats; `latlng` and `match_quality` are non-null together or null together. Each `capability_tags` entry has an `isco_code` drawn from the fixed tagging vocabulary, a `prominence` of `core`, `supporting`, or `incidental`, and a `confidence` of `high` or `low`, passed through verbatim from tagging.
 
 #### Scenario: Fully populated record
 
 - **WHEN** a company has successful fact-extraction, geocoding, global-scoring, tagline-extraction, tagging, and translation outputs
-- **THEN** the record has a non-null `address`, a non-null `latlng` with a `match_quality`, a `scores` object with all five axes carrying `score` and `evidence`, a `capability_tags` array of `{ family, prominence }` objects, and `en`/`nl` trees each carrying a `tagline` and a per-axis `reason`
+- **THEN** the record has a non-null `address`, a non-null `latlng` with a `match_quality`, a `scores` object with all five axes carrying `score` and `evidence`, a `capability_tags` array of `{ isco_code, prominence, confidence }` objects, and `en`/`nl` trees each carrying a `tagline` and a per-axis `reason`
 
 #### Scenario: Root holds only language-neutral data
 
 - **WHEN** any record is produced
-- **THEN** score numbers, `evidence`, `address`, `latlng`, `match_quality`, and `capability_tags` appear only at the root, and `tagline` and per-axis `reason` text appear only under the `en`/`nl` trees (numbers, coordinates, and capability slugs are never duplicated into the locale trees)
+- **THEN** score numbers, `evidence`, `address`, `latlng`, `match_quality`, and `capability_tags` appear only at the root, and `tagline` and per-axis `reason` text appear only under the `en`/`nl` trees (numbers, coordinates, and capability codes are never duplicated into the locale trees)
 
 ### Requirement: Field Projection
 
@@ -80,8 +80,8 @@ Each output field SHALL be sourced from exactly the following upstream field; th
 
 #### Scenario: Capability tags pass through verbatim
 
-- **WHEN** tagging produced a successful record with `capability_tags: [{ "family": "data-ai", "prominence": "core" }, ...]`
-- **THEN** the output record's `capability_tags` is the same array, copied verbatim, with no reordering, filtering, or reshaping
+- **WHEN** tagging produced a successful record with `capability_tags: [{ "isco_code": "251", "prominence": "core", "confidence": "high" }, ...]`
+- **THEN** the output record's `capability_tags` is the same array, copied verbatim, with no reordering, filtering, rollup, or reshaping
 
 ### Requirement: Block-Level Null Discipline
 

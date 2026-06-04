@@ -14,9 +14,9 @@ The pipeline SHALL be composed of the following stages. The leading integer deno
 4a. `geocoding` — depends on `fact-extraction`. Resolves the extracted address to a WGS84 lat/lng. Fact-derived.
 4b. `tagline-extraction` — depends on `content-summarization`. Derives the concise plain-language company tagline from the dossier. Dossier-derived analytic.
 4c. `global-scoring` — depends on `content-summarization`. Produces the five-axis structural score. Dossier-derived analytic.
-4d. `tagging` — depends on `content-summarization`. Produces the capability-family tag set from the dossier. Dossier-derived analytic. Slugs only; not a translation input.
+4d. `tagging` — depends on `content-summarization`. Produces the ISCO-08 minor-group occupational capability tag set from the dossier. Dossier-derived analytic. Codes only; not a translation input.
    Future analytic stages of the same shape (e.g. `ikigai-matching`) take additional wave-4 labels (`4e`, …) as dossier-derived analytics.
-5. `translation` — fan-in stage that reads the English outputs of the dossier-derived analytic stages that carry translatable text (`4b`, `4c`, and any future `4x` dossier-derived stage producing translatable text) and produces Dutch (`nl`) for all registered translatable fields, in one batched call per company. `geocoding` and `tagging` are not translation inputs (geocoding has no text; tagging emits slugs).
+5. `translation` — fan-in stage that reads the English outputs of the dossier-derived analytic stages that carry translatable text (`4b`, `4c`, and any future `4x` dossier-derived stage producing translatable text) and produces Dutch (`nl`) for all registered translatable fields, in one batched call per company. `geocoding` and `tagging` are not translation inputs (geocoding has no text; tagging emits language-neutral codes).
 6. `dataset-output` — terminal fan-in stage that projects per-stage outputs into one frontend-facing record per company. Its hard dependency is `fact-extraction` (its enumeration spine); it left-joins `geocoding`, the dossier-derived analytic stages, and `translation`, treating them as absent (null) when not present rather than requiring them.
 
 A downstream stage MUST NOT run for a given company until every stage it declares as a dependency has produced output for that company.

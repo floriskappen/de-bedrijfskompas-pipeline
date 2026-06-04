@@ -1,8 +1,9 @@
 """Thin OpenRouter client for tagging LLM calls.
 
-Returns a validated list of ``{family, prominence}`` capability tags. A response
-that will not parse and validate against the fixed family/prominence vocabularies
-and the one-entry-per-family rule is treated as an :class:`LLMError`.
+Returns a validated list of ``{isco_code, prominence, confidence}`` capability
+tags. A response that will not parse and validate against the fixed ISCO
+minor-group vocabulary and one-entry-per-code rule is treated as an
+:class:`LLMError`.
 """
 
 from __future__ import annotations
@@ -19,30 +20,144 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_TEMPERATURE = 0.1
 
-# Fixed tier-1 vocabulary. Source of truth: specs/tagging/spec.md and prompts/tagging.md.
-FAMILIES = frozenset({
-    "software-engineering",
-    "data-ai",
-    "hardware-electronics",
-    "mechanical-civil-engineering",
-    "life-sciences",
-    "earth-environmental-sciences",
-    "clinical-care",
-    "design-creative",
-    "content-media",
-    "commercial",
-    "finance-accounting",
-    "legal-compliance",
-    "policy-public-administration",
-    "operations-supply-chain",
-    "people-org",
-    "field-trades-operators",
-    "education-training",
-    "service-hospitality",
-    "community-social",
+# Fixed ISCO-08 minor-group vocabulary. Source of truth:
+# specs/tagging/spec.md and prompts/tagging.md.
+ISCO_MINOR_GROUPS = frozenset({
+    "011",
+    "021",
+    "031",
+    "111",
+    "112",
+    "121",
+    "122",
+    "131",
+    "132",
+    "133",
+    "134",
+    "141",
+    "142",
+    "143",
+    "211",
+    "212",
+    "213",
+    "214",
+    "215",
+    "216",
+    "221",
+    "222",
+    "223",
+    "224",
+    "225",
+    "226",
+    "231",
+    "232",
+    "233",
+    "234",
+    "235",
+    "241",
+    "242",
+    "243",
+    "251",
+    "252",
+    "261",
+    "262",
+    "263",
+    "264",
+    "265",
+    "311",
+    "312",
+    "313",
+    "314",
+    "315",
+    "321",
+    "322",
+    "323",
+    "324",
+    "325",
+    "331",
+    "332",
+    "333",
+    "334",
+    "335",
+    "341",
+    "342",
+    "343",
+    "351",
+    "352",
+    "411",
+    "412",
+    "413",
+    "421",
+    "422",
+    "431",
+    "432",
+    "441",
+    "511",
+    "512",
+    "513",
+    "514",
+    "515",
+    "516",
+    "521",
+    "522",
+    "523",
+    "524",
+    "531",
+    "532",
+    "541",
+    "611",
+    "612",
+    "613",
+    "621",
+    "622",
+    "631",
+    "632",
+    "633",
+    "634",
+    "711",
+    "712",
+    "713",
+    "721",
+    "722",
+    "723",
+    "731",
+    "732",
+    "741",
+    "742",
+    "751",
+    "752",
+    "753",
+    "754",
+    "811",
+    "812",
+    "813",
+    "814",
+    "815",
+    "816",
+    "817",
+    "818",
+    "821",
+    "831",
+    "832",
+    "833",
+    "834",
+    "835",
+    "911",
+    "912",
+    "921",
+    "931",
+    "932",
+    "933",
+    "941",
+    "951",
+    "952",
+    "961",
+    "962",
 })
 
 PROMINENCE_LEVELS = frozenset({"core", "supporting", "incidental"})
+CONFIDENCE_LEVELS = frozenset({"high", "low"})
+TAG_KEYS = frozenset({"isco_code", "prominence", "confidence"})
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
@@ -66,8 +181,8 @@ def call(
     """Call OpenRouter and return the validated capability-tags list.
 
     Raises :class:`LLMError` after *retries* transport/decode failures, or if the
-    response does not validate against the family/prominence vocabularies and the
-    one-entry-per-family rule.
+    response does not validate against the ISCO/prominence/confidence
+    vocabularies and the one-entry-per-code rule.
     """
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     resolved_model = resolve_model(model)
@@ -104,9 +219,9 @@ def _parse_tags(text: str) -> list[dict]:
     """Parse the completion into a validated ``capability_tags`` list.
 
     Raises ``ValueError`` if the response is not a JSON object containing a
-    ``capability_tags`` array of ``{family, prominence}`` entries, if any family
-    is not in :data:`FAMILIES`, if any prominence is not in
-    :data:`PROMINENCE_LEVELS`, or if two entries share a family.
+    ``capability_tags`` array of ``{isco_code, prominence, confidence}``
+    entries, if any code is not in :data:`ISCO_MINOR_GROUPS`, if any prominence
+    or confidence is invalid, or if two entries share an ISCO code.
     """
     stripped = (text or "").strip()
     m = _FENCE_RE.match(stripped)
@@ -125,14 +240,27 @@ def _parse_tags(text: str) -> list[dict]:
     for entry in tags:
         if not isinstance(entry, dict):
             raise ValueError(f"capability_tags entry is not an object: {entry!r}")
-        family = entry.get("family")
+        if set(entry.keys()) != TAG_KEYS:
+            raise ValueError(
+                f"capability_tags entry must have exactly {sorted(TAG_KEYS)}: {entry!r}"
+            )
+        isco_code = entry.get("isco_code")
         prominence = entry.get("prominence")
-        if family not in FAMILIES:
-            raise ValueError(f"unknown capability family: {family!r}")
+        confidence = entry.get("confidence")
+        if isco_code not in ISCO_MINOR_GROUPS:
+            raise ValueError(f"unknown ISCO minor-group code: {isco_code!r}")
         if prominence not in PROMINENCE_LEVELS:
             raise ValueError(f"unknown prominence: {prominence!r}")
-        if family in seen:
-            raise ValueError(f"duplicate family in capability_tags: {family!r}")
-        seen.add(family)
-        out.append({"family": family, "prominence": prominence})
+        if confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"unknown confidence: {confidence!r}")
+        if isco_code in seen:
+            raise ValueError(f"duplicate isco_code in capability_tags: {isco_code!r}")
+        seen.add(isco_code)
+        out.append(
+            {
+                "isco_code": isco_code,
+                "prominence": prominence,
+                "confidence": confidence,
+            }
+        )
     return out

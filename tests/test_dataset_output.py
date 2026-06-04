@@ -28,6 +28,7 @@ def dirs(tmp_path: Path) -> dict[str, Path]:
         "geocoding_dir": tmp_path / "geocoding",
         "scoring_dir": tmp_path / "global-scoring",
         "tagline_dir": tmp_path / "tagline-extraction",
+        "tagging_dir": tmp_path / "tagging",
         "translation_dir": tmp_path / "translation",
         "out_dir": tmp_path / "dataset-output",
     }
@@ -66,6 +67,15 @@ def _tagline(name: str = "Acme B.V.", *, status: str = "ok", en: str | None = "S
     return {"name": name, "website": "https://acme.example", "status": status, "tagline": {"en": en}}
 
 
+def _tagging(name: str = "Acme B.V.", *, status: str = "ok", tags: list[dict] | None = None) -> dict:
+    if tags is None:
+        tags = [
+            {"isco_code": "251", "prominence": "core", "confidence": "high"},
+            {"isco_code": "243", "prominence": "supporting", "confidence": "low"},
+        ]
+    return {"name": name, "website": "https://acme.example", "status": status, "capability_tags": tags}
+
+
 def _translation(name: str = "Acme B.V.", *, status: str = "ok", include_tagline: bool = True, include_scores: bool = True) -> dict:
     translations: dict = {}
     if include_tagline:
@@ -81,6 +91,7 @@ def _full(dirs: dict[str, Path], cid: str = "acme", name: str = "Acme B.V.", **s
     _write(dirs["geocoding_dir"], cid, {"name": name, "status": "ok", "latlng": {"lat": 52.0, "lng": 5.0}, "match_quality": "exact"})
     _write(dirs["scoring_dir"], cid, _scoring(name, **scoring_kw))
     _write(dirs["tagline_dir"], cid, _tagline(name))
+    _write(dirs["tagging_dir"], cid, _tagging(name))
     _write(dirs["translation_dir"], cid, _translation(name))
 
 
@@ -92,6 +103,7 @@ def _proc(dirs: dict[str, Path], cid: str, *, write: bool = False) -> dict:
         fact_dir=dirs["fact_dir"],
         scoring_dir=dirs["scoring_dir"],
         tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
         translation_dir=dirs["translation_dir"],
         geocoding_dir=dirs["geocoding_dir"],
     )
@@ -128,7 +140,8 @@ def test_one_record_per_spine_file(dirs):
     records = list(
         run(["a", "b", "c"], out_dir=dirs["out_dir"], write=False,
             fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-            tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+            tagline_dir=dirs["tagline_dir"], tagging_dir=dirs["tagging_dir"],
+            translation_dir=dirs["translation_dir"],
             geocoding_dir=dirs["geocoding_dir"])
     )
     assert {r["company_id"] for r in records} == {"a", "b", "c"}
@@ -160,6 +173,10 @@ def test_full_record_shape(dirs):
     assert rec["name"] == "Acme B.V." and rec["website"] == "https://acme.example"
     assert rec["status"] == "ok"
     assert rec["address"] == _ADDRESS
+    assert rec["capability_tags"] == [
+        {"isco_code": "251", "prominence": "core", "confidence": "high"},
+        {"isco_code": "243", "prominence": "supporting", "confidence": "low"},
+    ]
     assert set(rec["scores"]) == set(AXES)
     assert rec["scores"]["substance"] == {"score": 70, "evidence": "well_evidenced"}
     for locale in ("en", "nl"):
@@ -174,6 +191,7 @@ def test_neutral_data_at_root_only(dirs):
     rec = _proc(dirs, "acme")
     for locale in ("en", "nl"):
         assert "address" not in rec[locale]
+        assert "capability_tags" not in rec[locale]
         for axis in AXES:
             assert set(rec[locale]["scores"][axis]) == {"reason"}  # no score/evidence
 
@@ -296,7 +314,8 @@ def test_cli_writes_aggregated_json(dirs):
     _full(dirs, "beta", name="Beta B.V.")
     list(run(["acme", "beta"], out_dir=dirs["out_dir"], write=True,
              fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-             tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+             tagline_dir=dirs["tagline_dir"], tagging_dir=dirs["tagging_dir"],
+             translation_dir=dirs["translation_dir"],
              geocoding_dir=dirs["geocoding_dir"]))
     out = dirs["out_dir"] / "companies.json"
     assert out.exists()
@@ -321,7 +340,8 @@ def test_company_id_collision_raises(dirs):
     with pytest.raises(RuntimeError, match="collision"):
         list(run(["acme", "acme"], out_dir=dirs["out_dir"], write=True,
                  fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-                 tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+                 tagline_dir=dirs["tagline_dir"], tagging_dir=dirs["tagging_dir"],
+                 translation_dir=dirs["translation_dir"],
                  geocoding_dir=dirs["geocoding_dir"]))
 
 
@@ -341,7 +361,8 @@ def test_one_failure_does_not_abort_batch(dirs, monkeypatch):
     records = {r["company_id"]: r for r in run(
         ["good", "bad"], out_dir=dirs["out_dir"], write=False,
         fact_dir=dirs["fact_dir"], scoring_dir=dirs["scoring_dir"],
-        tagline_dir=dirs["tagline_dir"], translation_dir=dirs["translation_dir"],
+        tagline_dir=dirs["tagline_dir"], tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
         geocoding_dir=dirs["geocoding_dir"])}
     assert records["good"]["status"] == "ok"
     assert records["bad"]["status"] == "upstream_failed"
@@ -408,5 +429,4 @@ def test_dataset_output_includes_favicon_url(dirs):
     _write(dirs["fact_dir"], "acme", _fact("Acme B.V."))
     rec = _proc(dirs, "acme")
     assert rec["favicon_url"] is None
-
 

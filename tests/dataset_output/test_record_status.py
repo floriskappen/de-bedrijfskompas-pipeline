@@ -58,12 +58,12 @@ def test_capability_tags_alone_is_ok(dirs: dict[str, Path]) -> None:
     _write(dirs["tagging_dir"], cid, {
         "name": "Acme B.V.",
         "status": "ok",
-        "capability_tags": [{"family": "software-engineering", "prominence": "core"}]
+        "capability_tags": [{"isco_code": "251", "prominence": "core", "confidence": "high"}]
     })
 
     rec = _proc(dirs, cid)
     assert rec["status"] == "ok"
-    assert rec["capability_tags"] == [{"family": "software-engineering", "prominence": "core"}]
+    assert rec["capability_tags"] == [{"isco_code": "251", "prominence": "core", "confidence": "high"}]
     assert rec["address"] is None
     assert rec["latlng"] is None
     assert rec["scores"] is None

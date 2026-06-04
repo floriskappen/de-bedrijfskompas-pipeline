@@ -54,8 +54,8 @@ def test_capability_tags_pass_through_verbatim(dirs: dict[str, Path]) -> None:
     cid = "acme"
     _write(dirs["fact_dir"], cid, _fact())
     tags = [
-        {"family": "software-engineering", "prominence": "core"},
-        {"family": "commercial", "prominence": "supporting"},
+        {"isco_code": "251", "prominence": "core", "confidence": "high"},
+        {"isco_code": "243", "prominence": "supporting", "confidence": "low"},
     ]
     _write(dirs["tagging_dir"], cid, {"name": "Acme B.V.", "status": "ok", "capability_tags": tags})
 
