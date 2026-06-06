@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.dataset_output import core as dataset_output_core
 from pipeline.dataset_output.core import AXES, process, run
+from pipeline.dataset_output.timestamps import content_hash, timestamp_path
 from pipeline.website_resolution import company_id
 
 
@@ -109,6 +111,10 @@ def _proc(dirs: dict[str, Path], cid: str, *, write: bool = False) -> dict:
     )
 
 
+def _read_sidecar(dirs: dict[str, Path], cid: str) -> dict:
+    return json.loads(timestamp_path(dirs["out_dir"], cid).read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Input Sources
 # ---------------------------------------------------------------------------
@@ -165,7 +171,7 @@ def test_company_without_fact_extraction_skipped(dirs):
 # ---------------------------------------------------------------------------
 
 
-def test_full_record_shape(dirs):
+def test_fully_populated_record_includes_timestamps(dirs):
     """Fully populated record: all blocks present and well-formed."""
     _full(dirs, "acme", name="Acme B.V.")
     rec = _proc(dirs, "acme")
@@ -177,6 +183,8 @@ def test_full_record_shape(dirs):
         {"isco_code": "251", "prominence": "core", "confidence": "high"},
         {"isco_code": "243", "prominence": "supporting", "confidence": "low"},
     ]
+    assert rec["created_at"].endswith("Z")
+    assert rec["updated_at"].endswith("Z")
     assert set(rec["scores"]) == set(AXES)
     assert rec["scores"]["substance"] == {"score": 70, "evidence": "well_evidenced"}
     for locale in ("en", "nl"):
@@ -185,15 +193,199 @@ def test_full_record_shape(dirs):
         assert rec[locale]["scores"]["substance"]["reason"]
 
 
-def test_neutral_data_at_root_only(dirs):
+def test_root_only_holds_timestamps(dirs):
     """Score numbers, evidence, address live at root only; never in locale trees."""
     _full(dirs, "acme")
     rec = _proc(dirs, "acme")
     for locale in ("en", "nl"):
         assert "address" not in rec[locale]
         assert "capability_tags" not in rec[locale]
+        assert "created_at" not in rec[locale]
+        assert "updated_at" not in rec[locale]
         for axis in AXES:
             assert set(rec[locale]["scores"][axis]) == {"reason"}  # no score/evidence
+
+
+def test_first_time_seen_writes_sidecar_and_sets_both_timestamps(dirs):
+    """First time a company is seen."""
+    _full(dirs, "acme")
+    rec = process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T10:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+
+    assert rec["created_at"] == "2026-06-06T10:00:00Z"
+    assert rec["updated_at"] == "2026-06-06T10:00:00Z"
+    sidecar = _read_sidecar(dirs, "acme")
+    assert sidecar == {
+        "created_at": "2026-06-06T10:00:00Z",
+        "updated_at": "2026-06-06T10:00:00Z",
+        "content_hash": content_hash(rec),
+    }
+
+
+def test_unchanged_record_preserves_timestamps_and_does_not_rewrite_sidecar(dirs):
+    """Unchanged record preserves both timestamps."""
+    _full(dirs, "acme")
+    first = process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T10:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+    sidecar_path = timestamp_path(dirs["out_dir"], "acme")
+    original_sidecar = sidecar_path.read_text(encoding="utf-8")
+
+    second = process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T11:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+
+    assert second["created_at"] == first["created_at"]
+    assert second["updated_at"] == first["updated_at"]
+    assert sidecar_path.read_text(encoding="utf-8") == original_sidecar
+
+
+def test_changed_record_bumps_updated_at_only(dirs):
+    """Changed record bumps updated_at only."""
+    _full(dirs, "acme")
+    process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T10:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+    _write(dirs["tagline_dir"], "acme", _tagline("Acme B.V.", en="Builds better widgets."))
+
+    rec = process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T11:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+
+    assert rec["created_at"] == "2026-06-06T10:00:00Z"
+    assert rec["updated_at"] == "2026-06-06T11:00:00Z"
+    sidecar = _read_sidecar(dirs, "acme")
+    assert sidecar["created_at"] == "2026-06-06T10:00:00Z"
+    assert sidecar["updated_at"] == "2026-06-06T11:00:00Z"
+    assert sidecar["content_hash"] == content_hash(rec)
+
+
+def test_content_hash_ignores_timestamp_fields():
+    """Hash excludes the timestamp fields."""
+    base = {"company_id": "acme", "name": "Acme B.V.", "created_at": "2026-06-06T10:00:00Z"}
+    changed_timestamps = {
+        "company_id": "acme",
+        "name": "Acme B.V.",
+        "created_at": "2026-06-06T11:00:00Z",
+        "updated_at": "2026-06-06T11:30:00Z",
+    }
+    changed_content = {"company_id": "acme", "name": "Acme Widgets B.V."}
+
+    assert content_hash(base) == content_hash(changed_timestamps)
+    assert content_hash(base) != content_hash(changed_content)
+
+
+def test_single_run_shares_one_updated_at(dirs, monkeypatch):
+    """Single run shares one timestamp."""
+    _full(dirs, "acme")
+    _full(dirs, "beta", name="Beta B.V.")
+    calls = 0
+
+    def sequential_timestamp() -> str:
+        nonlocal calls
+        calls += 1
+        return f"2026-06-06T10:00:0{calls}Z"
+
+    monkeypatch.setattr(dataset_output_core, "_run_timestamp", sequential_timestamp)
+    records = list(run(
+        ["acme", "beta"],
+        out_dir=dirs["out_dir"],
+        write=False,
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    ))
+
+    assert calls == 1
+    assert {record["updated_at"] for record in records} == {"2026-06-06T10:00:01Z"}
+
+
+def test_dry_run_leaves_sidecars_untouched(dirs):
+    """Dry-run does not write sidecars."""
+    _full(dirs, "acme")
+    _full(dirs, "beta", name="Beta B.V.")
+    process(
+        "acme",
+        out_dir=dirs["out_dir"],
+        write=True,
+        run_timestamp="2026-06-06T10:00:00Z",
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )
+    sidecar_path = timestamp_path(dirs["out_dir"], "acme")
+    original_sidecar = sidecar_path.read_text(encoding="utf-8")
+    _write(dirs["tagline_dir"], "acme", _tagline("Acme B.V.", en="Builds better widgets."))
+
+    records = {record["company_id"]: record for record in run(
+        ["acme", "beta"],
+        out_dir=dirs["out_dir"],
+        write=False,
+        fact_dir=dirs["fact_dir"],
+        scoring_dir=dirs["scoring_dir"],
+        tagline_dir=dirs["tagline_dir"],
+        tagging_dir=dirs["tagging_dir"],
+        translation_dir=dirs["translation_dir"],
+        geocoding_dir=dirs["geocoding_dir"],
+    )}
+
+    assert records["acme"]["created_at"] == "2026-06-06T10:00:00Z"
+    assert records["acme"]["updated_at"] != "2026-06-06T10:00:00Z"
+    assert records["beta"]["created_at"] == records["beta"]["updated_at"]
+    assert sidecar_path.read_text(encoding="utf-8") == original_sidecar
+    assert not timestamp_path(dirs["out_dir"], "beta").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -429,4 +621,3 @@ def test_dataset_output_includes_favicon_url(dirs):
     _write(dirs["fact_dir"], "acme", _fact("Acme B.V."))
     rec = _proc(dirs, "acme")
     assert rec["favicon_url"] is None
-

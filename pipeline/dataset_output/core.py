@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
+from datetime import datetime, timezone
 from pathlib import Path
+
+from .timestamps import TimestampSidecar, content_hash, load_sidecar, write_sidecar
 
 FACT_DIR = Path("data/fact-extraction")
 GEOCODING_DIR = Path("data/geocoding")
@@ -36,6 +39,7 @@ def process(
     *,
     out_dir: Path,
     write: bool,
+    run_timestamp: str | None = None,
     fact_dir: Path = FACT_DIR,
     scoring_dir: Path = SCORING_DIR,
     tagline_dir: Path = TAGLINE_DIR,
@@ -51,7 +55,13 @@ def process(
     translation = _load(translation_dir / f"{cid}.json")
     geocoding = _load(geocoding_dir / f"{cid}.json")
 
-    record = _assemble(cid, fact, scoring, tagline, tagging, translation, geocoding)
+    timestamp = run_timestamp or _run_timestamp()
+    record = _apply_lifecycle(
+        _assemble(cid, fact, scoring, tagline, tagging, translation, geocoding),
+        out_dir=out_dir,
+        run_timestamp=timestamp,
+        write=write,
+    )
     if write:
         _write([record], out_dir=out_dir)
     return record
@@ -72,12 +82,14 @@ def run(
     """Yield one record per company. A per-company error becomes an ``upstream_failed`` record;
     only a company-id collision aborts the batch."""
     accumulated_records = []
+    run_timestamp = _run_timestamp()
     for cid in company_ids:
         try:
             record = process(
                 cid,
                 out_dir=out_dir,
                 write=False,
+                run_timestamp=run_timestamp,
                 fact_dir=fact_dir,
                 scoring_dir=scoring_dir,
                 tagline_dir=tagline_dir,
@@ -92,11 +104,19 @@ def run(
         except Exception as exc:
             failed = _empty_record(cid, status="upstream_failed")
             failed["_error"] = str(exc)
+            failed = _apply_lifecycle(
+                failed,
+                out_dir=out_dir,
+                run_timestamp=run_timestamp,
+                write=False,
+            )
             accumulated_records.append(failed)
             yield failed
 
     if write:
         _write(accumulated_records, out_dir=out_dir)
+        for record in accumulated_records:
+            _persist_lifecycle(record, out_dir=out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +280,60 @@ def _empty_record(cid: str, *, status: str) -> dict:
     }
 
 
+def _run_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _apply_lifecycle(record: dict, *, out_dir: Path, run_timestamp: str, write: bool) -> dict:
+    cid = record.get("company_id")
+    if not isinstance(cid, str) or not cid:
+        return record
+
+    fresh_hash = content_hash(record)
+    sidecar = load_sidecar(out_dir, cid)
+    if sidecar is None:
+        next_sidecar = TimestampSidecar(
+            created_at=run_timestamp,
+            updated_at=run_timestamp,
+            content_hash=fresh_hash,
+        )
+    elif sidecar.content_hash == fresh_hash:
+        next_sidecar = sidecar
+    else:
+        next_sidecar = TimestampSidecar(
+            created_at=sidecar.created_at,
+            updated_at=run_timestamp,
+            content_hash=fresh_hash,
+        )
+
+    record["created_at"] = next_sidecar.created_at
+    record["updated_at"] = next_sidecar.updated_at
+    if write and (sidecar is None or sidecar.content_hash != fresh_hash):
+        write_sidecar(out_dir, cid, next_sidecar)
+    return record
+
+
+def _persist_lifecycle(record: dict, *, out_dir: Path) -> None:
+    cid = record.get("company_id")
+    if not isinstance(cid, str) or not cid:
+        return
+
+    fresh_hash = content_hash(record)
+    sidecar = load_sidecar(out_dir, cid)
+    if sidecar is not None and sidecar.content_hash == fresh_hash:
+        return
+
+    created_at = record.get("created_at")
+    updated_at = record.get("updated_at")
+    if not isinstance(created_at, str) or not isinstance(updated_at, str):
+        return
+    write_sidecar(
+        out_dir,
+        cid,
+        TimestampSidecar(created_at=created_at, updated_at=updated_at, content_hash=fresh_hash),
+    )
+
+
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
@@ -276,7 +350,14 @@ def _load(path: Path) -> dict | None:
 
 
 def _write(records: list[dict], *, out_dir: Path) -> None:
-    # Check for duplicate company_id values in the input list
+    _check_duplicate_company_ids(records)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "companies.json"
+    out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _check_duplicate_company_ids(records: list[dict]) -> None:
     seen_ids = set()
     for record in records:
         cid = record.get("company_id")
@@ -285,7 +366,3 @@ def _write(records: list[dict], *, out_dir: Path) -> None:
         if cid in seen_ids:
             raise RuntimeError(f"company-id collision: duplicate company_id {cid!r}")
         seen_ids.add(cid)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "companies.json"
-    out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")

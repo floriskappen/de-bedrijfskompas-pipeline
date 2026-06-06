@@ -108,7 +108,7 @@ def test_publish_manifest_shape(
         "generated_at": "2026-05-27T14:30:00Z",
         "pipeline_git_sha": fake_git,
         "company_count": 2,
-        "schema_version": 1,
+        "schema_version": 2,
     }
 
 
