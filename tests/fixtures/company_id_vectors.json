@@ -1,0 +1,9 @@
+[
+  {"name": "Land Life Company B.V.", "company_id": "land-life-company"},
+  {"name": "Land Life Company", "company_id": "land-life-company"},
+  {"name": "Gravity B.V.", "company_id": "gravity"},
+  {"name": "Brainial B.V.", "company_id": "brainial"},
+  {"name": "Acme Holdings", "company_id": "acme"},
+  {"name": "Acme Holding", "company_id": "acme"},
+  {"name": "FooBar N.V.", "company_id": "foobar"}
+]

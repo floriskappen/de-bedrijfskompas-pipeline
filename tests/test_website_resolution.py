@@ -14,6 +14,15 @@ from pipeline.website_resolution import core as core_module
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_SET = REPO_ROOT / "test-set" / "companies.json"
 
+# Shared name->company_id vectors. The scraper repo carries a byte-identical
+# copy and asserts its own company_id() against it, so both implementations
+# stay aligned. See scraper/website_resolution/company_id.py.
+_COMPANY_ID_VECTORS = json.loads(
+    (Path(__file__).parent / "fixtures" / "company_id_vectors.json").read_text(
+        encoding="utf-8"
+    )
+)
+
 
 # ---------------------------------------------------------------------------
 # Offline tests: company_id slugification rule
@@ -22,15 +31,7 @@ TEST_SET = REPO_ROOT / "test-set" / "companies.json"
 
 @pytest.mark.parametrize(
     ("name", "expected"),
-    [
-        ("Land Life Company B.V.", "land-life-company"),
-        ("Land Life Company", "land-life-company"),
-        ("Gravity B.V.", "gravity"),
-        ("Brainial B.V.", "brainial"),
-        ("Acme Holdings", "acme"),
-        ("Acme Holding", "acme"),
-        ("FooBar N.V.", "foobar"),
-    ],
+    [(vector["name"], vector["company_id"]) for vector in _COMPANY_ID_VECTORS],
 )
 def test_company_id_strips_entity_suffixes(name: str, expected: str) -> None:
     assert company_id(name) == expected
