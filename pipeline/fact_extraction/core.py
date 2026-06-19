@@ -15,6 +15,49 @@ from .prompt import build_disambiguation_messages, build_fallback_messages
 FALLBACK_SURFACE_LIMIT = 2000  # chars fed to the prose-fallback LLM
 DISAMBIG_MAX_CANDIDATES = 5
 
+# Canonical address-bearing slugs, in priority order for the LLM-fallback
+# surface. content-collection now also emits address pages under slug
+# *variants* (``contact-2``, ``support-contact``, ``privacy-policy``,
+# ``legal-information`` ...); ``is_address_intent_slug`` recognises those so
+# recall preference and the fallback surface cover them too.
+ADDRESS_SLUGS = (
+    "contact",
+    "contact-us",
+    "over-ons",
+    "about",
+    "about-us",
+    "colofon",
+    "privacy",
+    "disclaimer",
+    "algemene-voorwaarden",
+)
+
+# Mirror of ``content_collection.crawl.is_address_intent_slug``. Stages are
+# self-contained (no shared cross-stage helpers), so this copy must be kept in
+# sync by hand if either side is widened.
+_ADDRESS_INTENT_STEMS = (
+    "contact",
+    "colofon",
+    "disclaimer",
+    "privacy",
+    "legal",
+    "voorwaarden",
+    "condities",
+    "terms",
+    "imprint",
+    "impressum",
+)
+_ADDRESS_INTENT_TOKENS = frozenset({"about", "over", "ons"})
+
+
+def is_address_intent_slug(slug: str) -> bool:
+    """Return whether *slug* names a contact/legal/privacy/identity address page."""
+
+    s = slug.lower()
+    if any(stem in s for stem in _ADDRESS_INTENT_STEMS):
+        return True
+    return bool(set(s.split("-")) & _ADDRESS_INTENT_TOKENS)
+
 
 def process(
     meta: dict,
@@ -23,6 +66,7 @@ def process(
     out_dir: Path,
     write: bool,
     offline: bool = False,
+    visible_pages: dict[str, str] | None = None,
 ) -> dict:
     """Extract facts for a single company. Never raises."""
 
@@ -34,7 +78,8 @@ def process(
         return result
 
     footer_text: str | None = meta.get("footer_text")
-    candidates = extract_candidates(footer_text, pages)
+    structured_text: str | None = meta.get("structured_text")
+    candidates = extract_candidates(footer_text, pages, structured_text, visible_pages)
 
     if len(candidates) == 1:
         result = _from_candidate(meta, candidates[0], status="regex_single")
@@ -84,8 +129,15 @@ def run(
     src = content_dir if content_dir is not None else DEFAULT_CONTENT_DIR
     for record in records:
         try:
-            meta, pages = _load_company(record, out_dir=src)
-            yield process(meta, pages, out_dir=out_dir, write=write, offline=offline)
+            meta, pages, visible_pages = _load_company(record, out_dir=src)
+            yield process(
+                meta,
+                pages,
+                out_dir=out_dir,
+                write=write,
+                offline=offline,
+                visible_pages=visible_pages,
+            )
         except Exception as exc:
             failed = _skeleton(record, status="upstream_failed")
             failed["_error"] = str(exc)
@@ -131,10 +183,20 @@ def _llm_fallback(
 def _build_fallback_surface(footer_text: str | None, pages: dict[str, str]) -> str:
     # footer_text is intentionally excluded: the regex already scanned it fully.
     # If it contained no postcode, it's unlikely to help the LLM and may add noise.
+    # Canonical address slugs lead (stable priority order); any other
+    # address-intent variant present (privacy-policy, support-contact, ...)
+    # follows so newly-discovered address pages still feed the fallback.
     parts: list[str] = []
-    for slug in ["contact", "over-ons", "about", "about-us"]:
+    used: set[str] = set()
+    for slug in ADDRESS_SLUGS:
         if slug in pages:
             parts.append(pages[slug])
+            used.add(slug)
+    for slug in sorted(pages):
+        if slug in used or not is_address_intent_slug(slug):
+            continue
+        parts.append(pages[slug])
+        used.add(slug)
     combined = "\n\n".join(parts)
     return combined[:FALLBACK_SURFACE_LIMIT]
 
@@ -178,8 +240,8 @@ def _coerce_address(raw: dict) -> dict:
     return address
 
 
-def _load_company(record: dict, *, out_dir: Path) -> tuple[dict, dict[str, str]]:
-    """Load _meta.json and relevant page markdown for a company record."""
+def _load_company(record: dict, *, out_dir: Path) -> tuple[dict, dict[str, str], dict[str, str]]:
+    """Load _meta.json plus page markdown and raw visible-text for a company."""
     name = record.get("name", "")
     cid = company_id(name)
     company_dir = out_dir / cid
@@ -191,20 +253,38 @@ def _load_company(record: dict, *, out_dir: Path) -> tuple[dict, dict[str, str]]
         meta = dict(record)
         meta["status"] = "upstream_failed"
 
-    # Prefer the recall-mode markdown when content-collection emitted one for
-    # this slug: precision mode strips structured address blocks as boilerplate,
-    # so the .md file commonly lacks the postcode the regex anchor needs.
     pages: dict[str, str] = {}
-    for slug in ["contact", "over-ons", "about", "about-us"]:
-        recall_path = company_dir / f"{slug}.recall.md"
-        if recall_path.exists():
-            pages[slug] = recall_path.read_text(encoding="utf-8")
-            continue
-        precision_path = company_dir / f"{slug}.md"
-        if precision_path.exists():
-            pages[slug] = precision_path.read_text(encoding="utf-8")
 
-    return meta, pages
+    # Prefer the recall-mode markdown when content-collection emitted one for
+    # address-bearing slugs: precision mode strips structured address blocks as
+    # boilerplate, so the .md file commonly lacks the postcode the regex anchor
+    # needs. All other collected pages are scanned from their precision file.
+    for path in sorted(company_dir.glob("*.md")):
+        if path.name.endswith(".recall.md"):
+            continue
+        slug = path.stem
+        if is_address_intent_slug(slug):
+            recall_path = company_dir / f"{slug}.recall.md"
+            if recall_path.exists():
+                pages[slug] = recall_path.read_text(encoding="utf-8")
+                continue
+        pages[slug] = path.read_text(encoding="utf-8")
+
+    # Recall-only address pages (precision .md dropped as thin).
+    for recall_path in sorted(company_dir.glob("*.recall.md")):
+        slug = recall_path.name[: -len(".recall.md")]
+        if slug not in pages:
+            pages[slug] = recall_path.read_text(encoding="utf-8")
+
+    # Raw visible-text surfaces for address-intent pages — fed to the postcode
+    # anchor only (kept out of the LLM fallback surface, which prefers the
+    # cleaner markdown), so addresses trafilatura dropped can still be matched.
+    visible_pages: dict[str, str] = {}
+    for visible_path in sorted(company_dir.glob("*.visible.txt")):
+        slug = visible_path.name[: -len(".visible.txt")]
+        visible_pages[slug] = visible_path.read_text(encoding="utf-8")
+
+    return meta, pages, visible_pages
 
 
 def _write(result: dict, *, out_dir: Path) -> None:

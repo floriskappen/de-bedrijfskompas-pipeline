@@ -7,9 +7,10 @@ from typing import Final
 
 import httpx
 
-USER_AGENT: Final = (
-    "Mozilla/5.0 (compatible; de-bedrijfskompas/0.1; "
-    "+https://github.com/floriskappen/de-bedrijfskompas)"
+PINNED_BROWSER_USER_AGENT: Final = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEOUT: Final = 15.0
 
@@ -33,6 +34,21 @@ class FetchResult:
         return self.html is not None
 
 
+def browser_user_agent() -> str:
+    """Return a browser-class UA, falling back to a pinned modern Chrome UA."""
+
+    try:
+        from fake_useragent import UserAgent
+
+        ua = UserAgent()
+        value = getattr(ua, "random", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+    return PINNED_BROWSER_USER_AGENT
+
+
 def get(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> FetchResult:
     last_err: tuple[str, str] | None = None
     for attempt in (1, 2):
@@ -40,7 +56,7 @@ def get(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> FetchResult:
             with httpx.Client(
                 follow_redirects=True,
                 timeout=timeout,
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": browser_user_agent()},
             ) as client:
                 resp = client.get(url)
         except httpx.TimeoutException as exc:

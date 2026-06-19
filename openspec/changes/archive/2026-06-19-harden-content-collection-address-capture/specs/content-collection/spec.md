@@ -1,29 +1,67 @@
-# content-collection Specification
+## ADDED Requirements
 
-## Purpose
+### Requirement: Realistic User-Agent
 
-Pipeline stage 2: fetch a curated subset of each company's website, extract clean markdown via trafilatura, and persist per-page markdown plus a `_meta.json` sidecar. The job is collection, not interpretation — downstream stages (`fact-extraction`, `content-summarization`) consume this output.
-## Requirements
-### Requirement: Input Record Shape
+Every HTTP fetch the stage issues SHALL send a realistic, current browser `User-Agent` header sourced from `fake-useragent`, rotated per fetch. When the library yields no usable value, the stage SHALL fall back to a pinned modern browser `User-Agent` string. The stage SHALL NOT send a self-identifying bot `User-Agent`.
 
-The stage SHALL read each record from `data/website-resolution/<company-id>.json`. A record is a JSON object with at least `name` (string, required) and `website` (string, optional). All other keys SHALL be preserved into the per-company `_meta.json`.
+#### Scenario: Browser User-Agent sent
 
-If `website` is `null`, missing, or empty, the stage SHALL NOT attempt any HTTP fetch and SHALL write only `_meta.json` with `status: "upstream_failed"`, preserving the upstream error context when available.
+- **WHEN** the stage fetches any URL
+- **THEN** the request carries a browser-class `User-Agent` (e.g. a current Chrome/Firefox/Safari string), not `de-bedrijfskompas/<version>`
 
-#### Scenario: Valid input with website
+#### Scenario: Fallback User-Agent when library yields nothing
 
-- **WHEN** input is `{"name": "Acme B.V.", "website": "https://acme.example"}`
-- **THEN** the stage proceeds with page selection and fetching
+- **WHEN** `fake-useragent` raises or returns an empty value
+- **THEN** the fetch proceeds with a pinned modern browser `User-Agent` rather than failing
 
-#### Scenario: Upstream failure propagation
+### Requirement: Headless Browser Fallback
 
-- **WHEN** input is `{"name": "Foo B.V.", "website": null, "status": "failed", "error": "no search results"}`
-- **THEN** no HTTP fetch is attempted; only `_meta.json` is written, with `status: "upstream_failed"` and the original upstream error retained
+The stage SHALL render the homepage with a headless browser (Playwright/Chromium) as a fallback, and only as a fallback, when the plain-HTTP homepage fetch either (a) fails with an HTTP `4xx`/`5xx`, a `429`, or a transport/timeout error, or (b) succeeds but yields fewer than a configured minimum of internal `<a>` links (the JS-rendered-SPA signal; default minimum is 1). On a successful render the stage SHALL feed the rendered HTML into the same link-extraction, selection, and extraction path used for plain-HTTP HTML.
 
-#### Scenario: Extra input keys preserved
+The headless render SHALL enforce a navigation timeout. A headless failure (timeout, navigation error, missing browser binary) SHALL be treated as a normal fetch failure: it is recorded and the company proceeds without aborting the batch. The stage SHALL NOT use the headless browser when plain HTTP already yielded a usable, link-bearing homepage.
 
-- **WHEN** input is `{"name": "Acme B.V.", "website": "https://acme.example", "source": "incubator-list-2026-01"}`
-- **THEN** the resulting `_meta.json` retains `source` with the same value
+#### Scenario: Anti-bot status triggers headless
+
+- **WHEN** the plain-HTTP homepage fetch returns HTTP `429`
+- **THEN** the stage re-fetches the homepage with the headless browser and, on success, proceeds with the rendered HTML
+
+#### Scenario: Link-less homepage triggers headless
+
+- **WHEN** the plain-HTTP homepage returns `200` but its HTML contains no internal `<a>` links
+- **THEN** the stage re-renders the homepage with the headless browser to recover client-rendered links
+
+#### Scenario: Usable static homepage skips headless
+
+- **WHEN** the plain-HTTP homepage returns `200` with internal `<a>` links present
+- **THEN** no headless render is performed
+
+#### Scenario: Headless failure degrades gracefully
+
+- **WHEN** the headless render times out or the browser binary is unavailable
+- **THEN** the failure is recorded, the company is processed as a normal fetch failure, and the batch continues
+
+### Requirement: Structured Address Capture
+
+From the homepage's raw HTML (and, when headless rendering occurred, the rendered DOM), the stage SHALL harvest machine-readable address signals before trafilatura extraction discards them, and concatenate their text into `_meta.json.structured_text`. The harvested signals SHALL include: JSON-LD `<script type="application/ld+json">` blocks containing a schema.org `PostalAddress` (e.g. `streetAddress`, `postalCode`, `addressLocality`); the textual content of `<address>` elements; and microdata `itemprop` address fields. Field values SHALL be joined with whitespace so the downstream postcode anchor can land on a `street postcode city` surface.
+
+If no such signal is present, `structured_text` SHALL be `null`. The stage SHALL NOT parse the harvested text into structured `{street, postcode, city}` fields — that is `fact-extraction`'s job.
+
+#### Scenario: JSON-LD PostalAddress harvested
+
+- **WHEN** the homepage HTML embeds `<script type="application/ld+json">{"@type":"Organization","address":{"@type":"PostalAddress","streetAddress":"Stadsplateau 34","postalCode":"3521 AZ","addressLocality":"Utrecht"}}</script>`
+- **THEN** `structured_text` contains `"Stadsplateau 34"`, `"3521 AZ"`, and `"Utrecht"` separated by whitespace
+
+#### Scenario: address element harvested
+
+- **WHEN** the homepage contains `<address>Europalaan 100, 3526 KS Utrecht</address>`
+- **THEN** `structured_text` contains `"Europalaan 100, 3526 KS Utrecht"`
+
+#### Scenario: No structured signal
+
+- **WHEN** the homepage HTML contains no JSON-LD address, `<address>` element, or address microdata
+- **THEN** `structured_text` is `null`
+
+## MODIFIED Requirements
 
 ### Requirement: Page Selection
 
@@ -154,29 +192,6 @@ For the same address-intent pages the stage SHALL also harvest the page's **raw 
 - **WHEN** a site's static HTML yields link-bearing, substantive content
 - **THEN** the stage extracts from the static HTML and no headless browser is used
 
-### Requirement: Footer Capture
-
-The stage SHALL extract the textual content of the homepage's `<footer>` element(s) into `_meta.json.footer_text`. Footer text is metadata, not page content, because trafilatura strips footers from its main-content extraction even though they commonly contain structured facts (HQ address, postcode, KvK numbers).
-
-Extraction SHALL preserve block-level element boundaries as `\n`: each block-level child (`<div>`, `<p>`, `<h1>`–`<h6>`, `<li>`, `<address>`, `<section>`, `<br>`, etc.) emits a newline at its boundary so the resulting text retains visual field separation. Inline-element boundaries emit a space. Horizontal whitespace runs are collapsed to a single space within a line; empty lines are dropped; `\n` is preserved as the field separator.
-
-If the homepage has no `<footer>` element or its content is empty after stripping, `footer_text` SHALL be `null`.
-
-#### Scenario: Footer with address captured
-
-- **WHEN** the homepage HTML contains `<footer>...Europalaan 100, 3526 KS Utrecht...</footer>`
-- **THEN** `footer_text` contains `"Europalaan 100, 3526 KS Utrecht"`
-
-#### Scenario: Block boundaries preserved
-
-- **WHEN** the homepage footer is `<footer><p>Smallepad 32</p><p>3811 MG Amersfoort</p><a>LinkedIn</a><a>Instagram</a></footer>`
-- **THEN** `footer_text` contains `"Smallepad 32"`, `"3811 MG Amersfoort"`, `"LinkedIn"`, `"Instagram"` separated by newlines or spaces — never fused into `"LinkedInInstagram"`
-
-#### Scenario: Footer absent
-
-- **WHEN** the homepage has no `<footer>` element
-- **THEN** `footer_text` is `null`
-
 ### Requirement: Output File Layout
 
 For each company processed (successfully or not), the stage SHALL produce `data/content-collection/<company-id>/` containing:
@@ -215,60 +230,6 @@ For each company processed (successfully or not), the stage SHALL produce `data/
 - **WHEN** the input record has `website: null` and `status: "failed"`
 - **THEN** `_meta.json` has `status: "upstream_failed"`, `pages_collected: 0`, empty `urls_attempted` / `pages`, `structured_text: null`, `canonical_homepage_url: null`, all sitemap fields zero/null/false; no markdown files are written
 
-### Requirement: Status Tracking
-
-`_meta.json.status` SHALL be exactly one of:
-
-- `"ok"` — ≥3 pages collected.
-- `"thin"` — 1 or 2 pages collected (homepage minimum).
-- `"fetch_failed"` — the homepage itself could not be fetched.
-- `"upstream_failed"` — `website-resolution` did not produce a usable URL; no fetch attempted.
-
-Per-page errors inside an otherwise-successful crawl SHALL be recorded in `urls_attempted` and SHALL NOT change the company-level `status`.
-
-#### Scenario: Healthy crawl
-
-- **WHEN** 5 pages are fetched and pass the content threshold
-- **THEN** `status` is `"ok"`
-
-#### Scenario: Thin result
-
-- **WHEN** only the homepage survives (other URLs 404 or fall below threshold)
-- **THEN** `status` is `"thin"`; the failed URLs appear in `urls_attempted`
-
-#### Scenario: Homepage unreachable
-
-- **WHEN** the homepage fetch fails
-- **THEN** `status` is `"fetch_failed"`, `pages_collected` is `0`, the error is recorded in `urls_attempted`
-
-### Requirement: Failure Handling
-
-The stage SHALL NOT halt or raise on per-page or per-company failures. Per-page errors are captured in `urls_attempted` and the next page proceeds. Per-company errors (e.g. homepage fetch failure) produce `_meta.json` with `status: "fetch_failed"` and the next company proceeds.
-
-#### Scenario: Per-page error does not abort the crawl
-
-- **WHEN** the second selected URL for `acme` returns a 404
-- **THEN** the 404 is recorded in `urls_attempted`; the remaining URLs are still fetched
-
-#### Scenario: One bad company does not block the rest
-
-- **WHEN** the second company's homepage is unreachable
-- **THEN** companies one and three are produced normally; company two gets `status: "fetch_failed"`
-
-### Requirement: Polite Crawling
-
-Within a single company, the stage SHALL fetch sequentially and sleep for a configurable interval (default 1 second) between page fetches. The stage MAY fetch `/robots.txt` once per company solely to discover the sitemap URL; it SHALL NOT honour `Disallow` directives.
-
-#### Scenario: Inter-page sleep
-
-- **WHEN** the stage fetches the second of N selected URLs for one company
-- **THEN** at least the configured interval has elapsed since the previous fetch
-
-#### Scenario: robots.txt consulted only for sitemap
-
-- **WHEN** `/robots.txt` contains `Disallow: /admin` and `Sitemap: /sitemap.xml`
-- **THEN** the `Sitemap:` line is used; the `Disallow:` line is ignored
-
 ### Requirement: Out of Scope
 
 The stage SHALL NOT:
@@ -287,94 +248,3 @@ The stage SHALL NOT:
 
 - **WHEN** the stage harvests `structured_text` from the homepage's raw HTML
 - **THEN** only the extracted text is written to `_meta.json`; the raw HTML is not saved to disk
-
-### Requirement: Operational Pitfalls
-
-The implementation SHALL handle these non-obvious environmental and library-quirk hazards. They are not requirements on observable behaviour but are load-bearing for any re-implementation:
-
-- **Namespaced sitemap XML.** Real sitemaps use the `http://www.sitemaps.org/schemas/sitemap/0.9` namespace; match `<loc>` by local name to avoid namespace-prefix fragility.
-- **WordPress sitemap path.** WordPress 5.5+ serves the sitemap at `/wp-sitemap.xml`, not `/sitemap.xml`. The `robots.txt` lookup catches this; don't hard-code `/sitemap.xml` as the only entry point.
-- **`<style>` / `<script>` inside `<footer>`.** Some CMSes (Squarespace) embed these inside `<footer>`. Strip them before extracting footer text. lxml's default `Element.remove()` discards the `tail`, which is where actual footer text often lives — preserve `tail` text.
-- **trafilatura's module-level dedup LRU.** With `deduplicate=True`, trafilatura keeps a process-wide LRU of seen blocks. Tests exercising multiple pages with similar prose MUST clear `trafilatura.deduplication.LRU_TEST` between runs, or content gets silently dropped.
-- **`tldextract` with reserved TLDs.** Test fixtures using hosts like `acme.example` produce empty suffix. Fall back to netloc comparison (stripping leading `www.`) when `tldextract` returns no suffix; don't treat empty-suffix as "no match".
-
-#### Scenario: Namespaced sitemap parsed
-
-- **WHEN** `/sitemap.xml` returns `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">...<url><loc>https://acme.example/about</loc></url>...</urlset>`
-- **THEN** `https://acme.example/about` is harvested into the candidate pool
-
-### Requirement: Favicon URL Extraction
-
-The stage SHALL extract a favicon URL from the homepage HTML. It SHALL parse `<link>` tags with `rel` values in `("icon", "shortcut icon", "apple-touch-icon", "apple-touch-icon-precomposed")`. It SHALL choose the icon closest to the target size of 512x512 (preferring size $\ge 512$ sorted ascending, then size $< 512$ sorted descending), preferring modern `rel` types as a tie-breaker. If no `<link>` tag is found, it SHALL fall back to `<homepage_url>/favicon.ico`. If the homepage fetch fails, `favicon_url` SHALL be `null`.
-
-#### Scenario: Best candidate favicon URL selected
-
-- **WHEN** the homepage HTML contains candidate icons of sizes `16x16`, `192x192`, `1024x1024`, and `512x512`
-- **THEN** the absolute URL of the `512x512` icon is chosen
-
-#### Scenario: Fallback icon used
-
-- **WHEN** the homepage HTML contains no favicon links, or the homepage fetch fails
-- **THEN** `favicon_url` is `<homepage_url>/favicon.ico` or `null` respectively
-
-### Requirement: Realistic User-Agent
-
-Every HTTP fetch the stage issues SHALL send a realistic, current browser `User-Agent` header sourced from `fake-useragent`, rotated per fetch. When the library yields no usable value, the stage SHALL fall back to a pinned modern browser `User-Agent` string. The stage SHALL NOT send a self-identifying bot `User-Agent`.
-
-#### Scenario: Browser User-Agent sent
-
-- **WHEN** the stage fetches any URL
-- **THEN** the request carries a browser-class `User-Agent` (e.g. a current Chrome/Firefox/Safari string), not `de-bedrijfskompas/<version>`
-
-#### Scenario: Fallback User-Agent when library yields nothing
-
-- **WHEN** `fake-useragent` raises or returns an empty value
-- **THEN** the fetch proceeds with a pinned modern browser `User-Agent` rather than failing
-
-### Requirement: Headless Browser Fallback
-
-The stage SHALL render the homepage with a headless browser (Playwright/Chromium) as a fallback, and only as a fallback, when the plain-HTTP homepage fetch either (a) fails with an HTTP `4xx`/`5xx`, a `429`, or a transport/timeout error, or (b) succeeds but yields fewer than a configured minimum of internal `<a>` links (the JS-rendered-SPA signal; default minimum is 1). On a successful render the stage SHALL feed the rendered HTML into the same link-extraction, selection, and extraction path used for plain-HTTP HTML.
-
-The headless render SHALL enforce a navigation timeout. A headless failure (timeout, navigation error, missing browser binary) SHALL be treated as a normal fetch failure: it is recorded and the company proceeds without aborting the batch. The stage SHALL NOT use the headless browser when plain HTTP already yielded a usable, link-bearing homepage.
-
-#### Scenario: Anti-bot status triggers headless
-
-- **WHEN** the plain-HTTP homepage fetch returns HTTP `429`
-- **THEN** the stage re-fetches the homepage with the headless browser and, on success, proceeds with the rendered HTML
-
-#### Scenario: Link-less homepage triggers headless
-
-- **WHEN** the plain-HTTP homepage returns `200` but its HTML contains no internal `<a>` links
-- **THEN** the stage re-renders the homepage with the headless browser to recover client-rendered links
-
-#### Scenario: Usable static homepage skips headless
-
-- **WHEN** the plain-HTTP homepage returns `200` with internal `<a>` links present
-- **THEN** no headless render is performed
-
-#### Scenario: Headless failure degrades gracefully
-
-- **WHEN** the headless render times out or the browser binary is unavailable
-- **THEN** the failure is recorded, the company is processed as a normal fetch failure, and the batch continues
-
-### Requirement: Structured Address Capture
-
-From the homepage's raw HTML (and, when headless rendering occurred, the rendered DOM), the stage SHALL harvest machine-readable address signals before trafilatura extraction discards them, and concatenate their text into `_meta.json.structured_text`. The harvested signals SHALL include: JSON-LD `<script type="application/ld+json">` blocks containing a schema.org `PostalAddress` (e.g. `streetAddress`, `postalCode`, `addressLocality`); the textual content of `<address>` elements; and microdata `itemprop` address fields. Field values SHALL be joined with whitespace so the downstream postcode anchor can land on a `street postcode city` surface.
-
-If no such signal is present, `structured_text` SHALL be `null`. The stage SHALL NOT parse the harvested text into structured `{street, postcode, city}` fields — that is `fact-extraction`'s job.
-
-#### Scenario: JSON-LD PostalAddress harvested
-
-- **WHEN** the homepage HTML embeds `<script type="application/ld+json">{"@type":"Organization","address":{"@type":"PostalAddress","streetAddress":"Stadsplateau 34","postalCode":"3521 AZ","addressLocality":"Utrecht"}}</script>`
-- **THEN** `structured_text` contains `"Stadsplateau 34"`, `"3521 AZ"`, and `"Utrecht"` separated by whitespace
-
-#### Scenario: address element harvested
-
-- **WHEN** the homepage contains `<address>Europalaan 100, 3526 KS Utrecht</address>`
-- **THEN** `structured_text` contains `"Europalaan 100, 3526 KS Utrecht"`
-
-#### Scenario: No structured signal
-
-- **WHEN** the homepage HTML contains no JSON-LD address, `<address>` element, or address microdata
-- **THEN** `structured_text` is `null`
-

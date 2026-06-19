@@ -9,15 +9,20 @@ from dataclasses import dataclass
 # Postcode regex
 # ---------------------------------------------------------------------------
 
-# Four digits, optional whitespace (including NBSP \xa0), two letters.
+# Four digits, runs of horizontal whitespace (space/tab/NBSP), two letters.
 # Boundary guards:
 #   - not preceded by alphanumeric or @ (rejects @1234ab in email addresses)
 #   - not followed by alphanumeric or . (rejects 1234ab.example domain parts)
 # Require uppercase letter pair — real Dutch postcodes on company sites are always
 # uppercase (e.g. "3526 KS"), so this eliminates year+word false positives like
 # "launched in 2015 to incredibly" matching as postcode "2015 TO".
+# Whitespace between digits and letters is `*` over *horizontal* whitespace only:
+# raw-HTML visible-text surfaces sometimes render the gap as several spaces or
+# NBSPs ("3526  KV  Utrecht"), but the digit/letter pair never spans a line break
+# in practice, so newlines are deliberately excluded to avoid matching a stray
+# 4-digit line end followed by a 2-letter line start (e.g. a year above "NL").
 _POSTCODE_RE = re.compile(
-    r"(?<![A-Za-z0-9@])(\d{4})[\s\xa0]?([A-Z]{2})(?![A-Za-z0-9.])",
+    r"(?<![A-Za-z0-9@])(\d{4})[ \t\xa0]*([A-Z]{2})(?![A-Za-z0-9.])",
     re.UNICODE,
 )
 
@@ -83,7 +88,7 @@ class Candidate:
     postcode: str  # always normalised "DDDD LL" uppercase
     city: str | None
     country: str = "NL"
-    surface: str = "footer"  # "footer" | "body"
+    surface: str = "footer"  # "structured" | "footer" | "body"
     context_snippet: str = ""  # surrounding text for disambiguation
     boost: bool = False
     demote: bool = False
@@ -207,27 +212,34 @@ def _is_postbus(candidate: Candidate) -> bool:
 
 def _rank_key(candidate: Candidate) -> tuple:
     boost_score = 0 if candidate.boost else (2 if candidate.demote else 1)
-    surface_score = 0 if candidate.surface == "footer" else 1
+    surface_order = {"structured": 0, "footer": 1, "body": 2}
+    surface_score = surface_order.get(candidate.surface, 3)
     return (boost_score, surface_score)
 
 
 def extract_candidates(
     footer_text: str | None,
     pages: dict[str, str],
+    structured_text: str | None = None,
+    visible_pages: dict[str, str] | None = None,
 ) -> list[Candidate]:
     """Return ranked, filtered candidates from all surfaces.
 
-    Surface priority: footer_text first, then contact/over-ons/about pages.
-    Postbus candidates are removed. Result is sorted best-first.
+    Surface priority: structured_text first, then footer_text, then page bodies
+    (markdown plus any raw visible-text surfaces). Postbus candidates are
+    removed. Result is sorted best-first.
     """
-    PAGE_ORDER = ["contact", "over-ons", "about", "about-us"]
-
     raw: list[Candidate] = []
+    if structured_text:
+        raw.extend(_extract_candidates(structured_text, surface="structured"))
     if footer_text:
         raw.extend(_extract_candidates(footer_text, surface="footer"))
-    for slug in PAGE_ORDER:
-        if slug in pages:
-            raw.extend(_extract_candidates(pages[slug], surface="body"))
+    for text in pages.values():
+        raw.extend(_extract_candidates(text, surface="body"))
+    # Raw visible text rescues addresses trafilatura dropped from the markdown;
+    # it ranks as ``body`` (lowest) so cleaner structured/footer hits win first.
+    for text in (visible_pages or {}).values():
+        raw.extend(_extract_candidates(text, surface="body"))
 
     filtered = [c for c in raw if not _is_postbus(c)]
     filtered.sort(key=_rank_key)

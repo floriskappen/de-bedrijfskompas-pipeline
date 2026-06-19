@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Final
 from urllib.parse import urljoin, urlparse
 
@@ -9,9 +10,11 @@ import tldextract
 from lxml import html as lxml_html
 from slugify import slugify
 
+_TLD_EXTRACT = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+
 # Identity / mission / services — read first.
 TIER_1_PATHS: Final = (
-    "/about", "/about-us", "/over-ons", "/over",
+    "/about", "/about-us", "/over-ons", "/over", "/colofon",
     "/who-we-are", "/wie-we-zijn",
     "/company", "/bedrijf",
     "/story", "/ons-verhaal", "/history", "/geschiedenis",
@@ -44,7 +47,7 @@ TIER_2_PATHS: Final = (
     "/pricing", "/prijzen",
     "/press", "/pers", "/media",
     "/faq", "/veelgestelde-vragen",
-    "/contact",
+    "/contact", "/contact-us", "/privacy", "/disclaimer", "/algemene-voorwaarden",
 )
 
 # Fresh content — fallback only.
@@ -71,17 +74,32 @@ _EXCLUDED_EXTENSIONS: Final = frozenset(
 )
 
 
+# A locale/language root path such as ``/nl``, ``/en``, ``/nl-nl`` or ``/en_us``.
+# These are kept by ``normalize_homepage`` so a localised homepage (e.g.
+# ``brunel.net/nl-nl``) is crawled from its Dutch shell — where the Dutch
+# contact/location links live — rather than the global ``/`` shell.
+_LOCALE_ROOT_RE: Final = re.compile(r"^[a-z]{2}([-_][a-z]{2})?$")
+
+
 def normalize_homepage(url: str) -> str:
-    """Strip path/query/fragment from a website URL to get the root."""
+    """Return the homepage URL to crawl from.
+
+    Query and fragment are always dropped. The path is stripped to ``/`` too,
+    except a single-segment locale/language root (``/nl-nl``, ``/en`` ...),
+    which is preserved so localised sites are crawled from the right shell.
+    """
 
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         raise ValueError(f"cannot normalize non-absolute URL: {url!r}")
+    segments = [s for s in (parsed.path or "").split("/") if s]
+    if len(segments) == 1 and _LOCALE_ROOT_RE.match(segments[0].lower()):
+        return f"{parsed.scheme}://{parsed.netloc}/{segments[0]}"
     return f"{parsed.scheme}://{parsed.netloc}/"
 
 
 def _registered_domain(url: str) -> str:
-    ext = tldextract.extract(url)
+    ext = _TLD_EXTRACT(url)
     if ext.domain and ext.suffix:
         return f"{ext.domain}.{ext.suffix}".lower()
     # Fallback for hostnames without a recognized public-suffix TLD
@@ -91,6 +109,16 @@ def _registered_domain(url: str) -> str:
     if netloc.startswith("www."):
         netloc = netloc[4:]
     return netloc
+
+
+def has_excluded_extension(path: str) -> bool:
+    """Return whether *path*'s last segment ends in a known binary/document extension."""
+
+    lower = (path or "").lower()
+    last = lower.rsplit("/", 1)[-1]
+    if "." not in last:
+        return False
+    return ("." + last.rsplit(".", 1)[-1]) in _EXCLUDED_EXTENSIONS
 
 
 def extract_internal_links(homepage_url: str, html: str) -> list[str]:
@@ -123,11 +151,8 @@ def extract_internal_links(homepage_url: str, html: str) -> list[str]:
             continue
         path = parsed.path or "/"
         # Reject file downloads by extension.
-        lower = path.lower()
-        if "." in lower.rsplit("/", 1)[-1]:
-            ext = "." + lower.rsplit(".", 1)[-1]
-            if ext in _EXCLUDED_EXTENSIONS:
-                continue
+        if has_excluded_extension(path):
+            continue
         # Drop fragments and queries to canonicalize.
         canon = f"{parsed.scheme}://{parsed.netloc}{path}"
         if canon == homepage_url:
@@ -147,6 +172,49 @@ def _path_matches(url_path: str, tier_path: str) -> bool:
     return p.startswith(t + "/")
 
 
+# Address-intent detection. The tier-path lists only match a fixed set of
+# leading prefixes, so address-bearing pages whose slug is a *variant*
+# (``/contact-2``, ``/support/contact``, ``/nl/contact``, ``/privacy-policy``,
+# ``/legal-information``, ``/voorwaarden-en-condities`` ...) are never selected.
+# An address-intent slug is recognised anywhere in the path by token/stem so
+# these variants enter the normal selection (as tier 2, alongside ``/contact``)
+# and are recall-extracted for fact-extraction.
+#
+# NOTE: fact-extraction keeps its own mirror of this predicate. Stages are
+# self-contained (no shared cross-stage helpers), so the two copies must be
+# kept in sync by hand if either is widened.
+_ADDRESS_INTENT_STEMS: Final = (
+    "contact",
+    "colofon",
+    "disclaimer",
+    "privacy",  # privacy, privacy-policy, privacybeleid
+    "legal",  # legal, legal-information
+    "voorwaarden",  # algemene-voorwaarden, voorwaarden-en-condities
+    "condities",
+    "terms",  # terms-and-conditions
+    "imprint",
+    "impressum",
+)
+# Identity pages that commonly carry the registered address. Matched as whole
+# slug tokens (not substrings) because ``over`` would otherwise hit unrelated
+# slugs like ``discover-qualify``.
+_ADDRESS_INTENT_TOKENS: Final = frozenset({"about", "over", "ons"})
+
+# Address-intent variants land in tier 2 at the front, so on a large site they
+# rank ahead of generic tier-2 supporting pages without disturbing the tier-1
+# identity pages that precede them.
+_ADDRESS_INTENT_POSITION: Final = -1
+
+
+def is_address_intent_slug(slug: str) -> bool:
+    """Return whether *slug* names a contact/legal/privacy/identity address page."""
+
+    s = slug.lower()
+    if any(stem in s for stem in _ADDRESS_INTENT_STEMS):
+        return True
+    return bool(set(s.split("-")) & _ADDRESS_INTENT_TOKENS)
+
+
 def _classify(url: str) -> tuple[int, int] | None:
     """Return ``(tier, position_in_tier)`` for a URL or ``None``."""
 
@@ -157,6 +225,8 @@ def _classify(url: str) -> tuple[int, int] | None:
         for pos, tp in enumerate(tier_paths):
             if _path_matches(path, tp):
                 return tier_index, pos
+    if is_address_intent_slug(slugify_path(url)):
+        return 2, _ADDRESS_INTENT_POSITION
     return None
 
 
@@ -240,9 +310,14 @@ def select_urls(
         for _depth, pos, link in tiered[tier]:
             if len(selected) >= MAX_SELECTED_URLS:
                 break
-            if prefix_count.get(pos, 0) >= PER_PREFIX_CAP:
+            # Address-intent variants share one synthetic position but are
+            # distinct pages (contact, privacy, voorwaarden, ...), so the
+            # per-prefix cap — meant to stop one prefix's sub-tree from
+            # monopolising slots — must not collapse them together.
+            capped = pos != _ADDRESS_INTENT_POSITION
+            if capped and prefix_count.get(pos, 0) >= PER_PREFIX_CAP:
                 continue
-            if _add(link):
+            if _add(link) and capped:
                 prefix_count[pos] = prefix_count.get(pos, 0) + 1
         if len(selected) >= MAX_SELECTED_URLS:
             break

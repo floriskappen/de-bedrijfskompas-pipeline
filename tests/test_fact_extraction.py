@@ -24,12 +24,18 @@ MEDIUM_TEST_SET = REPO_ROOT / "test-set" / "companies-medium.json"
 # ---------------------------------------------------------------------------
 
 
-def _meta(name: str = "Acme B.V.", status: str = "ok", footer_text: str | None = None) -> dict:
+def _meta(
+    name: str = "Acme B.V.",
+    status: str = "ok",
+    footer_text: str | None = None,
+    structured_text: str | None = None,
+) -> dict:
     return {
         "name": name,
         "website": "https://acme.example",
         "status": status,
         "footer_text": footer_text,
+        "structured_text": structured_text,
         "pages_collected": 1,
     }
 
@@ -90,6 +96,25 @@ def test_nonbreaking_space_tolerated() -> None:
     result = _proc(meta)
     assert result["address"]["postcode"] == "3526 KS"
     assert result["address"]["city"] == "Utrecht"
+
+
+def test_postcode_multiple_whitespace_tolerated() -> None:
+    # Raw visible-text surfaces sometimes render the gap as several spaces/NBSPs.
+    meta = _meta(footer_text="Vening Meinesz building C\n3526  KV  Utrecht, The Netherlands")
+    result = _proc(meta)
+    assert result["address"]["postcode"] == "3526 KV"
+    assert result["address"]["city"] == "Utrecht"
+
+    meta2 = _meta(footer_text="Straat 1, 3526\xa0\xa0KS Utrecht")
+    assert _proc(meta2)["address"]["postcode"] == "3526 KS"
+
+
+def test_postcode_does_not_span_newline() -> None:
+    # A 4-digit line end followed by a 2-uppercase line start must NOT match
+    # (the digit/letter gap is horizontal whitespace only).
+    meta = _meta(footer_text="Founded 2024\n\nNL based company")
+    result = _proc(meta, offline=True)
+    assert result["address"]["postcode"] is None
 
 
 def test_postcode_in_email_rejected() -> None:
@@ -186,6 +211,36 @@ def test_footer_beats_body() -> None:
     candidates = extract_candidates(footer, pages)
     assert candidates[0].surface == "footer"
     assert candidates[0].postcode == "1234 AA"
+
+
+def test_structured_text_anchored() -> None:
+    meta = _meta(structured_text="Stadsplateau 34 3521 AZ Utrecht")
+    result = _proc(meta)
+    assert result["status"] == "regex_single"
+    assert result["address"] == {
+        "street": "Stadsplateau 34",
+        "postcode": "3521 AZ",
+        "city": "Utrecht",
+        "country": "NL",
+    }
+
+
+def test_postcode_on_non_address_page_anchored() -> None:
+    meta = _meta()
+    pages = {"index": "Adres\nEuropalaan 100\n3526 KS Utrecht"}
+    result = _proc(meta, pages)
+    assert result["status"] == "regex_single"
+    assert result["address"]["postcode"] == "3526 KS"
+
+
+def test_structured_beats_footer_beats_body() -> None:
+    candidates = extract_candidates(
+        "Footerstraat 2, 2222 BB Rotterdam",
+        {"about": "Bodystraat 3, 3333 CC Amsterdam"},
+        "Structuurstraat 1, 1111 AA Utrecht",
+    )
+    assert [c.surface for c in candidates] == ["structured", "footer", "body"]
+    assert [c.postcode for c in candidates] == ["1111 AA", "2222 BB", "3333 CC"]
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +472,98 @@ def test_md_used_when_no_recall_md(tmp_path: Path) -> None:
     results = list(run(records, out_dir=tmp_path / "out", write=False, content_dir=content_dir))
     assert results[0]["status"] == "regex_single"
     assert results[0]["address"]["postcode"] == "3526 KS"
+
+
+def test_recall_md_preferred_for_widened_address_slug(tmp_path: Path) -> None:
+    content_dir = tmp_path / "content-collection"
+    from pipeline.website_resolution import company_id
+
+    cid = company_id("Acme B.V.")
+    d = content_dir / cid
+    d.mkdir(parents=True)
+    (d / "_meta.json").write_text(
+        json.dumps(
+            {"name": "Acme B.V.", "website": "https://acme.example", "status": "ok", "footer_text": None}
+        ),
+        encoding="utf-8",
+    )
+    (d / "colofon.md").write_text("Generic legal prose.", encoding="utf-8")
+    (d / "colofon.recall.md").write_text("Adres\nEuropalaan 100\n3526 KS Utrecht", encoding="utf-8")
+
+    records = [{"name": "Acme B.V.", "website": "https://acme.example"}]
+    results = list(run(records, out_dir=tmp_path / "out", write=False, content_dir=content_dir))
+
+    assert results[0]["status"] == "regex_single"
+    assert results[0]["address"]["postcode"] == "3526 KS"
+
+
+def test_all_collected_pages_loaded_for_postcode_anchor(tmp_path: Path) -> None:
+    content_dir = tmp_path / "content-collection"
+    from pipeline.website_resolution import company_id
+
+    cid = company_id("Acme B.V.")
+    d = content_dir / cid
+    d.mkdir(parents=True)
+    (d / "_meta.json").write_text(
+        json.dumps({"name": "Acme B.V.", "website": "https://acme.example", "status": "ok", "footer_text": None}),
+        encoding="utf-8",
+    )
+    (d / "careers.md").write_text("Office\nEuropalaan 100\n3526 KS Utrecht", encoding="utf-8")
+
+    records = [{"name": "Acme B.V.", "website": "https://acme.example"}]
+    results = list(run(records, out_dir=tmp_path / "out", write=False, content_dir=content_dir))
+
+    assert results[0]["status"] == "regex_single"
+    assert results[0]["address"]["postcode"] == "3526 KS"
+
+
+def test_fallback_surface_includes_widened_address_slugs() -> None:
+    pages = {
+        "privacy": "Privacy address prose",
+        "disclaimer": "Disclaimer address prose",
+        "platform": "Platform prose should not be included",
+    }
+    surface = core_module._build_fallback_surface(None, pages)
+    assert "Privacy address prose" in surface
+    assert "Disclaimer address prose" in surface
+    assert "Platform prose" not in surface
+
+
+def test_fallback_surface_includes_address_intent_variants() -> None:
+    pages = {
+        "privacy-policy": "Variant privacy prose",
+        "support-contact": "Variant contact prose",
+        "solutions": "Solutions prose should not be included",
+    }
+    surface = core_module._build_fallback_surface(None, pages)
+    assert "Variant privacy prose" in surface
+    assert "Variant contact prose" in surface
+    assert "Solutions prose" not in surface
+
+
+def test_visible_txt_recovers_dropped_address(tmp_path: Path) -> None:
+    content_dir = tmp_path / "content-collection"
+    from pipeline.website_resolution import company_id
+
+    d = content_dir / company_id("Acme B.V.")
+    d.mkdir(parents=True)
+    (d / "_meta.json").write_text(
+        json.dumps({"name": "Acme B.V.", "website": "https://acme.example", "status": "ok", "footer_text": None}),
+        encoding="utf-8",
+    )
+    # trafilatura dropped the address from the markdown, but the raw visible-text
+    # surface kept it. The postcode anchor must recover it without an LLM call.
+    (d / "contact.md").write_text("Get in touch via the form below.", encoding="utf-8")
+    (d / "contact.visible.txt").write_text(
+        "Contact\nPrincetonlaan 6\n3584 CB Utrecht", encoding="utf-8"
+    )
+
+    records = [{"name": "Acme B.V.", "website": "https://acme.example"}]
+    results = list(run(records, out_dir=tmp_path / "out", write=False, content_dir=content_dir))
+
+    assert results[0]["status"] == "regex_single"
+    assert results[0]["address"]["postcode"] == "3584 CB"
+    assert results[0]["address"]["city"] == "Utrecht"
 
 
 def test_dry_run_yields_without_writing(tmp_path: Path) -> None:

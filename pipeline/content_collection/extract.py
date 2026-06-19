@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Final
 from urllib.parse import urljoin
@@ -175,6 +176,139 @@ def extract_footer_text(html: str) -> str | None:
     return _normalise_block_text("\n".join(parts)) or None
 
 
+def extract_visible_text(html: str) -> str | None:
+    """Return the page's raw visible text with block boundaries as newlines.
+
+    trafilatura — even in recall mode — classifies address cards, "our offices"
+    widgets and contact side-blocks as boilerplate and drops them, so an address
+    that is plainly visible on the page can be missing from both ``.md`` and
+    ``.recall.md``. This walks the rendered ``<body>`` directly (after removing
+    script/style/noscript), preserving block boundaries as newlines so the
+    downstream postcode anchor lands on ``street\\npostcode city`` surfaces.
+
+    The result is intentionally noisy (nav, forms, cookie banners): it is only
+    suitable as an extra surface for address recall, never as a replacement for
+    the precision markdown used for summarisation/embedding.
+    """
+
+    try:
+        doc = lxml_html.fromstring(html)
+    except (ValueError, lxml_html.etree.ParserError):
+        return None
+
+    etree.strip_elements(doc, "script", "style", "noscript", with_tail=False)
+
+    bodies = doc.xpath("//body")
+    root = bodies[0] if bodies else doc
+    text = _text_with_block_breaks(root)
+    return _normalise_block_text(text) or None
+
+
+_ADDRESS_ITEMPROPS: Final = frozenset(
+    [
+        "streetAddress",
+        "postalCode",
+        "addressLocality",
+        "addressRegion",
+        "addressCountry",
+    ]
+)
+
+
+def extract_structured_text(html: str) -> str | None:
+    """Harvest structured address surfaces from raw HTML."""
+
+    try:
+        doc = lxml_html.fromstring(html)
+    except (ValueError, lxml_html.etree.ParserError):
+        return None
+
+    parts: list[str] = []
+    parts.extend(_jsonld_postal_addresses(doc))
+
+    for address_el in doc.iter("address"):
+        text = _normalise_inline_text(address_el.text_content())
+        if text:
+            parts.append(text)
+
+    for item in doc.xpath('//*[@itemscope and contains(@itemtype, "PostalAddress")]'):
+        values: list[str] = []
+        for prop in _ADDRESS_ITEMPROPS:
+            for el in item.xpath(f'.//*[@itemprop="{prop}"]'):
+                value = el.get("content") or el.get("value") or el.text_content()
+                value = _normalise_inline_text(value)
+                if value:
+                    values.append(value)
+        text = _normalise_inline_text(" ".join(values))
+        if text:
+            parts.append(text)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part not in seen:
+            unique.append(part)
+            seen.add(part)
+
+    return _normalise_inline_text(" ".join(unique)) or None
+
+
+def _jsonld_postal_addresses(doc) -> list[str]:
+    out: list[str] = []
+    for script in doc.xpath('//script[contains(translate(@type, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "application/ld+json")]'):
+        raw = script.text or script.text_content()
+        if not raw or not raw.strip():
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for address in _walk_jsonld_addresses(payload):
+            text = _address_dict_text(address)
+            if text:
+                out.append(text)
+    return out
+
+
+def _walk_jsonld_addresses(value) -> list[dict]:
+    found: list[dict] = []
+    if isinstance(value, list):
+        for item in value:
+            found.extend(_walk_jsonld_addresses(item))
+    elif isinstance(value, dict):
+        address = value.get("address")
+        if _is_postal_address(address):
+            found.append(address)
+        if _is_postal_address(value):
+            found.append(value)
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                found.extend(_walk_jsonld_addresses(child))
+    return found
+
+
+def _is_postal_address(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    type_value = value.get("@type") or value.get("type")
+    if isinstance(type_value, list):
+        return any(str(v).lower() == "postaladdress" for v in type_value)
+    return str(type_value).lower() == "postaladdress"
+
+
+def _address_dict_text(address: dict) -> str | None:
+    values: list[str] = []
+    for key in ("streetAddress", "postalCode", "addressLocality", "addressRegion", "addressCountry"):
+        value = address.get(key)
+        if isinstance(value, dict):
+            value = value.get("name")
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if item)
+        elif value:
+            values.append(str(value))
+    return _normalise_inline_text(" ".join(values)) or None
+
+
 def _text_with_block_breaks(element) -> str:
     """Extract text preserving block-level element boundaries as newlines.
 
@@ -210,3 +344,7 @@ def _normalise_block_text(text: str) -> str:
     """Collapse intra-line whitespace and drop empty lines, but keep newlines."""
     lines = [_INLINE_WS_RE.sub(" ", line).strip() for line in text.split("\n")]
     return "\n".join(line for line in lines if line)
+
+
+def _normalise_inline_text(text: str) -> str:
+    return _INLINE_WS_RE.sub(" ", text.replace("\n", " ")).strip()

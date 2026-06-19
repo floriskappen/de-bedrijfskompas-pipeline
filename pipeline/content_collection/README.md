@@ -26,6 +26,7 @@ data/content-collection/<company-id>/
     index.md
     about.md
     contact.md
+    contact.recall.md
     ...
 ```
 
@@ -58,6 +59,8 @@ Matching is path-prefix, case-insensitive, trailing-slash-insensitive. Hard cap:
 ## Dependencies
 
 - [`httpx`](https://pypi.org/project/httpx/) — HTTP client with timeouts and follow-redirects.
+- [`fake-useragent`](https://pypi.org/project/fake-useragent/) — browser-class User-Agent rotation.
+- [`playwright`](https://pypi.org/project/playwright/) — fallback Chromium rendering for blocked or link-less homepages.
 - [`trafilatura`](https://pypi.org/project/trafilatura/) — HTML-to-markdown extractor; tuned for precision over recall.
 - [`lxml`](https://pypi.org/project/lxml/) — link extraction and footer parsing.
 - [`python-slugify`](https://pypi.org/project/python-slugify/) — slug derivation.
@@ -66,6 +69,19 @@ Matching is path-prefix, case-insensitive, trailing-slash-insensitive. Hard cap:
 ## Footer capture
 
 `trafilatura` intentionally strips footers as boilerplate, but footers commonly hold structured facts (HQ address, postcode, Chamber of Commerce numbers). The stage extracts the homepage's `<footer>` text separately into `_meta.json.footer_text` so `fact-extraction` (stage 3a) can use it.
+
+## Browser fallback setup
+
+HTTP fetches send a rotating browser User-Agent. When a homepage returns an anti-bot failure or produces no internal links, the stage falls back to Playwright/Chromium for that homepage only.
+
+After installing the project in your virtual environment, install the Chromium browser binary once:
+
+```bash
+pip install -e .
+playwright install chromium
+```
+
+If Chromium is not installed, imports still work and the stage records the headless failure as a normal fetch error.
 
 ## Tests
 
@@ -79,7 +95,6 @@ pytest tests/test_content_collection.py -m network
 
 ## Known limitations
 
-- **No JS rendering.** SPAs commonly land in `thin` or `fetch_failed`. A future change can add `playwright` behind a flag.
-- **No `robots.txt`.** Requests-per-host stay low (≤ 8 pages with 1 s spacing), so we skip the lookup for now.
+- **No full JS crawl.** Playwright renders the homepage only; selected sub-pages still use plain HTTP.
+- **No `robots.txt`.** Requests-per-host stay low (≤ 12 pages with 1 s spacing), so we skip the lookup for now.
 - **No on-disk HTTP cache.** Re-runs re-fetch. Add `requests-cache`-style caching when running against larger lists.
-- **No sitemap parsing.** Only homepage internal links are considered.

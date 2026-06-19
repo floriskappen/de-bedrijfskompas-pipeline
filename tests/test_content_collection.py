@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from pipeline.content_collection import core as core_module
+from pipeline.content_collection import fetch as fetch_module
 from pipeline.content_collection import crawl, extract
 from pipeline.content_collection.crawl import (
     extract_internal_links,
@@ -22,12 +25,22 @@ MEDIUM_TEST_SET = REPO_ROOT / "test-set" / "companies-medium.json"
 
 
 @pytest.fixture(autouse=True)
-def _reset_trafilatura_dedup() -> None:
+def _reset_trafilatura_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     """trafilatura keeps a module-level LRU of seen blocks; reset per test."""
 
     from trafilatura import deduplication
 
     deduplication.LRU_TEST.clear()
+    monkeypatch.setattr(
+        core_module.render,
+        "render_homepage",
+        lambda url: FetchResult(
+            url=url,
+            html=None,
+            error="headless unavailable",
+            error_kind="headless",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +70,21 @@ def test_extract_internal_links_filters() -> None:
     links = extract_internal_links("https://acme.example/", html)
     paths = sorted(l.replace("https://acme.example", "") for l in links)
     assert paths == ["/about", "/about-us/our-story", "/team"]
+
+
+@pytest.mark.parametrize(
+    ("path", "excluded"),
+    [
+        ("/app/uploads/2023/05/logo-about.jpg", True),  # image whose slug has an "about" token
+        ("/files/report.pdf", True),
+        ("/archive.zip", True),
+        ("/nl/contact", False),
+        ("/privacy-policy", False),
+        ("/", False),
+    ],
+)
+def test_has_excluded_extension(path: str, excluded: bool) -> None:
+    assert crawl.has_excluded_extension(path) is excluded
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +381,201 @@ def test_favicon_fallback_and_null_status() -> None:
 
 
 # ---------------------------------------------------------------------------
+# fetch: User-Agent
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_sends_browser_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_headers: dict[str, str] = {}
+
+    class FakeUA:
+        @property
+        def random(self) -> str:
+            return (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) "
+                "AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
+            )
+
+    class FakeClient:
+        def __init__(self, *, follow_redirects, timeout, headers):
+            captured_headers.update(headers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def get(self, url: str):
+            return types.SimpleNamespace(status_code=200, text="<html></html>", url=url)
+
+    monkeypatch.setitem(sys.modules, "fake_useragent", types.SimpleNamespace(UserAgent=FakeUA))
+    monkeypatch.setattr(fetch_module.httpx, "Client", FakeClient)
+
+    result = fetch_module.get("https://acme.example/")
+
+    assert result.ok
+    ua = captured_headers["User-Agent"]
+    assert "Mozilla/5.0" in ua
+    assert "Chrome/" in ua
+    assert "de-bedrijfskompas" not in ua
+
+
+def test_fetch_falls_back_to_pinned_ua(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_headers: dict[str, str] = {}
+
+    class BrokenUA:
+        @property
+        def random(self) -> str:
+            raise RuntimeError("no UA")
+
+    class FakeClient:
+        def __init__(self, *, follow_redirects, timeout, headers):
+            captured_headers.update(headers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def get(self, url: str):
+            return types.SimpleNamespace(status_code=200, text="<html></html>", url=url)
+
+    monkeypatch.setitem(sys.modules, "fake_useragent", types.SimpleNamespace(UserAgent=BrokenUA))
+    monkeypatch.setattr(fetch_module.httpx, "Client", FakeClient)
+
+    result = fetch_module.get("https://acme.example/")
+
+    assert result.ok
+    assert captured_headers["User-Agent"] == fetch_module.PINNED_BROWSER_USER_AGENT
+    assert "de-bedrijfskompas" not in captured_headers["User-Agent"]
+
+
+# ---------------------------------------------------------------------------
+# extract: structured address capture
+# ---------------------------------------------------------------------------
+
+
+def test_structured_text_from_jsonld() -> None:
+    html = _wrap(
+        """
+        <script type="application/ld+json">
+        {"@type":"Organization","address":{"@type":"PostalAddress","streetAddress":"Stadsplateau 34","postalCode":"3521 AZ","addressLocality":"Utrecht"}}
+        </script>
+        """
+    )
+    out = extract.extract_structured_text(html)
+    assert out is not None
+    assert "Stadsplateau 34" in out
+    assert "3521 AZ" in out
+    assert "Utrecht" in out
+
+
+def test_structured_text_from_address_element() -> None:
+    out = extract.extract_structured_text(
+        _wrap("<address>Europalaan 100, 3526 KS Utrecht</address>")
+    )
+    assert out == "Europalaan 100, 3526 KS Utrecht"
+
+
+def test_structured_text_null_when_absent() -> None:
+    assert extract.extract_structured_text(_wrap("<main>No address here</main>")) is None
+
+
+def test_extract_visible_text_recovers_dropped_address() -> None:
+    # trafilatura recall drops address cards; the raw visible-text surface keeps
+    # them. The block-break walk puts the postcode on a line the anchor reaches.
+    html = _wrap(
+        "<main><h1>Contact</h1></main>"
+        "<aside class='office-card'><div>Princetonlaan 6</div>"
+        "<div>3584 CB Utrecht</div></aside>"
+    )
+    out = extract.extract_visible_text(html)
+    assert out is not None
+    assert "Princetonlaan 6" in out
+    assert "3584 CB Utrecht" in out
+
+
+def test_extract_visible_text_strips_script_and_style() -> None:
+    html = _wrap("<style>.x{color:red}</style><script>var a=1;</script><p>Hello</p>")
+    out = extract.extract_visible_text(html)
+    assert out == "Hello"
+
+
+# ---------------------------------------------------------------------------
+# crawl: address-intent classification & locale roots
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("slug", "expected"),
+    [
+        ("contact", True),
+        ("contact-2", True),
+        ("support-contact", True),
+        ("nl-contact", True),
+        ("contact-ons", True),
+        ("privacy", True),
+        ("privacy-policy", True),
+        ("privacybeleid", True),
+        ("legal-information", True),
+        ("voorwaarden-en-condities", True),
+        ("algemene-voorwaarden", True),
+        ("colofon", True),
+        ("disclaimer", True),
+        ("over-ons", True),
+        ("about-us", True),
+        ("platform", False),
+        ("discover-qualify", False),  # contains "over" only as a substring, not a token
+        ("index", False),
+        ("team", False),
+        ("blog", False),
+    ],
+)
+def test_is_address_intent_slug(slug: str, expected: bool) -> None:
+    assert crawl.is_address_intent_slug(slug) is expected
+
+
+def test_select_urls_classifies_address_variants() -> None:
+    base = "https://acme.example"
+    homepage = base + "/"
+    links = [
+        base + "/contact-2/",
+        base + "/support/contact",
+        base + "/privacy-policy",
+        base + "/legal-information",
+        base + "/nl/contact",
+        base + "/some-product",  # unclassified, must not appear
+    ]
+    selected, _ = select_urls(homepage, links)
+    urls = {u for u, _ in selected}
+    assert base + "/contact-2/" in urls
+    assert base + "/support/contact" in urls
+    assert base + "/privacy-policy" in urls
+    assert base + "/legal-information" in urls
+    assert base + "/nl/contact" in urls
+    assert base + "/some-product" not in urls
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://brunel.net/nl-nl", "https://brunel.net/nl-nl"),
+        ("https://acme.example/en", "https://acme.example/en"),
+        ("https://acme.example/en_us", "https://acme.example/en_us"),
+        ("https://acme.example/nl-nl/", "https://acme.example/nl-nl"),
+        ("https://acme.example/products", "https://acme.example/"),
+        ("https://acme.example/nl-nl/contact", "https://acme.example/"),
+        ("https://acme.example/", "https://acme.example/"),
+        ("https://acme.example/nl?lang=en#x", "https://acme.example/nl"),
+    ],
+)
+def test_normalize_homepage_locale_roots(url: str, expected: str) -> None:
+    assert crawl.normalize_homepage(url) == expected
+
+
+# ---------------------------------------------------------------------------
 # core.process — end-to-end with mocked fetch
 # ---------------------------------------------------------------------------
 
@@ -438,6 +661,7 @@ def test_process_upstream_failed_no_fetch(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert meta["pages_collected"] == 0
     assert meta["urls_attempted"] == []
     assert meta["pages"] == {}
+    assert meta["structured_text"] is None
     assert (tmp_path / "foo" / "_meta.json").exists()
     assert called == []
 
@@ -453,6 +677,97 @@ def test_process_fetch_failed_homepage(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert meta["pages_collected"] == 0
     assert meta["urls_attempted"][0]["status"] == "error"
     assert "timeout" in meta["urls_attempted"][0]["error"]
+
+
+def test_headless_triggered_on_429(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    rendered_html = _page("Home", extra_links='<a href="/contact">Contact</a>')
+
+    def _fetch(url: str, *, timeout: float = 15.0) -> FetchResult:
+        if url == f"{base}/":
+            return FetchResult(url=url, html=None, error="HTTP 429", error_kind="http_429")
+        return FetchResult(url=url, html=_page("Contact"), error=None, error_kind=None)
+
+    monkeypatch.setattr(core_module.fetch, "get", _fetch)
+    render_calls: list[str] = []
+
+    def _render(url: str) -> FetchResult:
+        render_calls.append(url)
+        return FetchResult(url=url, html=rendered_html, error=None, error_kind=None)
+
+    monkeypatch.setattr(core_module.render, "render_homepage", _render)
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=False)
+
+    assert render_calls == [f"{base}/"]
+    assert meta["status"] == "thin"
+    assert any(a["slug"] == "index" and a["status"] == "written" for a in meta["urls_attempted"])
+
+
+def test_headless_triggered_on_linkless_homepage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    static_html = _page("Static", extra_links="")
+    rendered_html = _page("Rendered", extra_links='<a href="/contact">Contact</a>')
+    pages = {f"{base}/": static_html, f"{base}/contact": _page("Contact")}
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    render_calls: list[str] = []
+
+    def _render(url: str) -> FetchResult:
+        render_calls.append(url)
+        return FetchResult(url=url, html=rendered_html, error=None, error_kind=None)
+
+    monkeypatch.setattr(core_module.render, "render_homepage", _render)
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=False)
+
+    assert render_calls == [f"{base}/"]
+    assert "Rendered" in (meta["pages"]["index"]["title"] or "")
+
+
+def test_headless_skipped_when_static_homepage_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links='<a href="/contact">Contact</a>'),
+        f"{base}/contact": _page("Contact"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    render_calls: list[str] = []
+    monkeypatch.setattr(
+        core_module.render,
+        "render_homepage",
+        lambda url: render_calls.append(url)
+        or FetchResult(url=url, html=_page("Rendered"), error=None, error_kind=None),
+    )
+
+    core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=False)
+
+    assert render_calls == []
+
+
+def test_headless_failure_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    monkeypatch.setattr(
+        core_module.fetch,
+        "get",
+        lambda url: FetchResult(url=url, html=None, error="HTTP 429", error_kind="http_429"),
+    )
+    monkeypatch.setattr(
+        core_module.render,
+        "render_homepage",
+        lambda url: FetchResult(url=url, html=None, error="headless timeout", error_kind="timeout"),
+    )
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=False)
+
+    assert meta["status"] == "fetch_failed"
+    assert meta["urls_attempted"][0]["status"] == "error"
+    assert "headless timeout" in meta["urls_attempted"][0]["error"]
 
 
 def test_process_thin_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
@@ -505,6 +820,28 @@ def test_process_write_false_no_disk(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert payload_dry == payload_wet
 
 
+def test_meta_records_structured_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    homepage = _page("Home", extra_links=HOMEPAGE_LINKS).replace(
+        "</body>",
+        '<script type="application/ld+json">{"@type":"Organization","address":{"@type":"PostalAddress","streetAddress":"Stadsplateau 34","postalCode":"3521 AZ","addressLocality":"Utrecht"}}</script></body>',
+    )
+    pages = {
+        f"{base}/": homepage,
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    assert meta["structured_text"] is not None
+    assert "Stadsplateau 34" in meta["structured_text"]
+    saved = json.loads((tmp_path / "acme" / "_meta.json").read_text(encoding="utf-8"))
+    assert saved["structured_text"] == meta["structured_text"]
+
+
 def test_process_writes_recall_md_for_address_slugs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
 ) -> None:
@@ -536,6 +873,82 @@ def test_process_writes_recall_md_for_address_slugs(
     assert not (company_dir / "index.recall.md").exists()
 
 
+def test_sparse_contact_page_yields_recall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links='<a href="/contact">Contact</a>'),
+        f"{base}/contact": (
+            "<html><body><main>Contact</main>"
+            "<address>Europalaan 100, 3526 KS Utrecht</address></body></html>"
+        ),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    monkeypatch.setattr(core_module.extract, "extract_markdown", lambda html: "short")
+    monkeypatch.setattr(
+        core_module.extract,
+        "extract_markdown_recall",
+        lambda html: "Europalaan 100, 3526 KS Utrecht",
+    )
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    assert any(a["slug"] == "contact" and a["status"] == "dropped_thin" for a in meta["urls_attempted"])
+    company_dir = tmp_path / "acme"
+    assert not (company_dir / "contact.md").exists()
+    assert (company_dir / "contact.recall.md").read_text(encoding="utf-8") == (
+        "Europalaan 100, 3526 KS Utrecht"
+    )
+
+
+def test_recall_emitted_for_colofon(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links='<a href="/colofon">Colofon</a>'),
+        f"{base}/colofon": _page("Colofon"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    monkeypatch.setattr(core_module.extract, "extract_markdown_recall", lambda html: "Recall colofon")
+
+    core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    assert (tmp_path / "acme" / "colofon.recall.md").exists()
+
+
+def test_non_address_subthreshold_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links='<a href="/platform">Platform</a>'),
+        f"{base}/platform": "<html><body><main>tiny</main></body></html>",
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+
+    meta = core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    assert any(a["slug"] == "platform" and a["status"] == "dropped_thin" for a in meta["urls_attempted"])
+    assert not (tmp_path / "acme" / "platform.md").exists()
+
+
+def test_recall_skipped_for_non_address_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links='<a href="/platform">Platform</a>'),
+        f"{base}/platform": _page("Platform"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    monkeypatch.setattr(core_module.extract, "extract_markdown_recall", lambda html: "Recall platform")
+
+    core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    assert (tmp_path / "acme" / "platform.md").exists()
+    assert not (tmp_path / "acme" / "platform.recall.md").exists()
+
+
 def test_process_omits_recall_md_when_empty(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
 ) -> None:
@@ -561,6 +974,53 @@ def test_process_omits_recall_md_when_empty(
     assert (company_dir / "about.md").exists()  # precision still written
     assert not (company_dir / "about.recall.md").exists()
     assert not (company_dir / "contact.recall.md").exists()
+
+
+def test_visible_txt_written_for_address_pages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    pages = {
+        f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS),
+        f"{base}/about": _page("About"),
+        f"{base}/team": _page("Team"),
+        f"{base}/contact": _page("Contact"),
+    }
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+
+    core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=True)
+
+    company_dir = tmp_path / "acme"
+    # Address-intent pages get a raw visible-text companion; others do not.
+    assert (company_dir / "contact.visible.txt").exists()
+    assert (company_dir / "about.visible.txt").exists()
+    assert not (company_dir / "team.visible.txt").exists()
+    assert not (company_dir / "index.visible.txt").exists()
+
+
+def test_canonical_homepage_url_adopted_after_redirect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    input_url = "https://old.example/"
+    canonical = "https://new.example"
+    # The homepage redirects to a different registered domain; its links live
+    # on the new host. fetch.get reports the post-redirect URL.
+    home_html = _page("Home", extra_links='<a href="https://new.example/contact">Contact</a>')
+
+    def _fetcher(url: str, *, timeout: float = 15.0) -> FetchResult:
+        if url == input_url:
+            return FetchResult(url=canonical + "/", html=home_html, error=None, error_kind=None)
+        if url == canonical + "/contact":
+            return FetchResult(url=url, html=_page("Contact"), error=None, error_kind=None)
+        return FetchResult(url=url, html=None, error="HTTP 404", error_kind="http_404")
+
+    monkeypatch.setattr(core_module.fetch, "get", _fetcher)
+
+    meta = core_module.process({"name": "Acme B.V.", "website": input_url}, out_dir=tmp_path, write=True)
+
+    assert meta["canonical_homepage_url"] == canonical + "/"
+    # The new-domain contact link survived same-domain filtering and was fetched.
+    assert any(a["url"] == canonical + "/contact" and a["status"] == "written" for a in meta["urls_attempted"])
 
 
 def test_process_name_mismatch_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:

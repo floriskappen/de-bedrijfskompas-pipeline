@@ -9,8 +9,10 @@ description = "Company-first discovery pipeline: scrape, extract, and de-marketi
 requires-python = ">=3.11"
 dependencies = [
     "ddgs",
+    "fake-useragent",
     "httpx",
     "lxml",
+    "playwright",
     "python-slugify",
     "tldextract",
     "trafilatura",
