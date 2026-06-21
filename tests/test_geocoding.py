@@ -31,10 +31,9 @@ class MockResponse:
 
 # Mock PDOK Client for core tests
 class MockPDOKClient:
-    def __init__(self, exact_res=None, postcode_res=None, city_res=None, should_raise=False):
+    def __init__(self, exact_res=None, postcode_res=None, should_raise=False):
         self.exact_res = exact_res
         self.postcode_res = postcode_res
-        self.city_res = city_res
         self.should_raise = should_raise
         self.calls = []
 
@@ -49,12 +48,6 @@ class MockPDOKClient:
         if self.should_raise:
             raise pdok.PDOKError("Mock error")
         return self.postcode_res
-
-    def city_centroid(self, city):
-        self.calls.append(("city_centroid", city))
-        if self.should_raise:
-            raise pdok.PDOKError("Mock error")
-        return self.city_res
 
 # ---------------------------------------------------------------------------
 # PDOK Client Tests
@@ -114,6 +107,25 @@ def test_suffix_letter_ignored() -> None:
     addr = {"street": "Europalaan 100a", "postcode": "3526KS", "city": "Utrecht", "country": "NL"}
     prep = address.prepare(addr)
     assert prep["huisnummer"] == 100
+    assert prep["skip_reason"] is None
+
+def test_letter_and_addition_suffix_reduced_to_base() -> None:
+    """Verify 'Turbinestraat 8c1' yields base house number 8, not 81."""
+    addr = {"street": "Turbinestraat 8c1", "postcode": "3903LW", "city": "Veenendaal", "country": "NL"}
+    prep = address.prepare(addr)
+    assert prep["huisnummer"] == 8
+
+def test_hyphenated_range_takes_first_number() -> None:
+    """Verify 'Smallepad 5-7' yields the first house number 5."""
+    addr = {"street": "Smallepad 5-7", "postcode": "3526KS", "city": "Utrecht", "country": "NL"}
+    prep = address.prepare(addr)
+    assert prep["huisnummer"] == 5
+
+def test_no_digit_street_has_no_house_number() -> None:
+    """Verify a street with no digits (e.g. '<br>') yields no house number."""
+    addr = {"street": "<br>", "postcode": "3526KS", "city": "Utrecht", "country": "NL"}
+    prep = address.prepare(addr)
+    assert prep["huisnummer"] is None
     assert prep["skip_reason"] is None
 
 def test_non_nl_skip_reason() -> None:
@@ -199,33 +211,35 @@ def test_exact_falls_through_to_postcode(tmp_path: Path) -> None:
     assert res["latlng"] == {"lat": 52.2, "lng": 5.2}
     assert client.calls == [("exact", "3526KS", 100), ("postcode_centroid", "3526KS")]
 
-def test_postcode_falls_through_to_city(tmp_path: Path) -> None:
-    """WHEN exact and postcode tiers return 0 docs, THEN city_centroid is attempted."""
+def test_both_tiers_empty_yields_empty_status(tmp_path: Path) -> None:
+    """WHEN both tiers return 0 docs, THEN status=empty, latlng/match_quality/source all null."""
     rec = {
         "name": "Acme B.V.",
         "status": "regex_single",
         "address": {"street": "Europalaan 100", "postcode": "3526 KS", "city": "Utrecht", "country": "NL"}
     }
-    client = MockPDOKClient(exact_res=None, postcode_res=None, city_res={"lat": 52.3, "lng": 5.3})
-    res = core.process(rec, out_dir=tmp_path, write=False, client=client)
-    assert res["status"] == "ok"
-    assert res["match_quality"] == "city_centroid"
-    assert res["latlng"] == {"lat": 52.3, "lng": 5.3}
-    assert client.calls == [("exact", "3526KS", 100), ("postcode_centroid", "3526KS"), ("city_centroid", "Utrecht")]
-
-def test_all_tiers_empty_yields_empty_status(tmp_path: Path) -> None:
-    """WHEN all tiers return 0 docs, THEN status=empty, latlng/match_quality/source all null."""
-    rec = {
-        "name": "Acme B.V.",
-        "status": "regex_single",
-        "address": {"street": "Europalaan 100", "postcode": "3526 KS", "city": "Utrecht", "country": "NL"}
-    }
-    client = MockPDOKClient(exact_res=None, postcode_res=None, city_res=None)
+    client = MockPDOKClient(exact_res=None, postcode_res=None)
     res = core.process(rec, out_dir=tmp_path, write=False, client=client)
     assert res["status"] == "empty"
     assert res["latlng"] is None
     assert res["match_quality"] is None
     assert res["source"] is None
+    # No whole-city tier: resolution stops after postcode_centroid.
+    assert client.calls == [("exact", "3526KS", 100), ("postcode_centroid", "3526KS")]
+
+def test_city_only_address_makes_no_request(tmp_path: Path) -> None:
+    """WHEN only a city is available (no postcode), THEN no HTTP call and status=empty."""
+    rec = {
+        "name": "Acme B.V.",
+        "status": "regex_single",
+        "address": {"street": None, "postcode": None, "city": "Utrecht", "country": "NL"}
+    }
+    client = MockPDOKClient(exact_res={"lat": 52.0, "lng": 5.0})
+    res = core.process(rec, out_dir=tmp_path, write=False, client=client)
+    assert res["status"] == "empty"
+    assert res["latlng"] is None
+    assert res["match_quality"] is None
+    assert len(client.calls) == 0
 
 def test_tier_skipped_when_input_unavailable(tmp_path: Path) -> None:
     """WHEN postcode is available but no house number, THEN exact tier is skipped."""
@@ -306,8 +320,6 @@ def test_one_failure_does_not_abort_batch(tmp_path: Path) -> None:
                 raise pdok.PDOKError("Simulated timeout")
             return {"lat": 52.0, "lng": 5.0}
         def postcode_centroid(self, postcode):
-            return None
-        def city_centroid(self, city):
             return None
 
     results = list(core.run(records, out_dir=tmp_path, write=False, client=MixedClient()))

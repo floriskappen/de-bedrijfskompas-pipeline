@@ -73,8 +73,3 @@ def postcode_centroid(postcode: str, timeout: float = 5.0) -> dict | None:
     """Query PDOK postcode centroid tier."""
     fq_filters = ["type:postcode", f"postcode:{postcode}"]
     return _query_pdok(fq_filters, timeout=timeout)
-
-def city_centroid(city: str, timeout: float = 5.0) -> dict | None:
-    """Query PDOK city centroid tier."""
-    fq_filters = ["type:woonplaats", f"woonplaatsnaam:{city}"]
-    return _query_pdok(fq_filters, timeout=timeout)

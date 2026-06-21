@@ -51,7 +51,6 @@ def process(
 
     postcode_no_space = prep["postcode_no_space"]
     huisnummer = prep["huisnummer"]
-    city = prep["city"]
 
     status = None
     latlng = None
@@ -77,15 +76,8 @@ def process(
                 source = "pdok"
                 status = "ok"
 
-        # Tier 3: city_centroid
-        if status is None and city:
-            res = client.city_centroid(city)
-            if res is not None:
-                latlng = res
-                match_quality = "city_centroid"
-                source = "pdok"
-                status = "ok"
-
+        # No whole-city tier: a city-only address resolves to "empty" rather than
+        # a kilometre-scale pin (see geocoding spec, Tiered PDOK Lookup).
         if status is None:
             status = "empty"
 

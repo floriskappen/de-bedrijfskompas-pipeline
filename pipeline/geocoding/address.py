@@ -45,10 +45,12 @@ def prepare(address: dict | None) -> dict:
     street = address.get("street")
     huisnummer = None
     if street:
-        cleaned_street = re.sub(r"(?<=\d)[a-zA-Z]+", "", street)
-        match = re.search(r"\b(\d+)\b", cleaned_street)
+        # First run of digits is the base house number; trailing letters and
+        # additions (e.g. "8c1" -> 8) are excluded. PDOK indexes suffixed
+        # addresses under this base number, so it resolves the rooftop.
+        match = re.search(r"\d+", street)
         if match:
-            huisnummer = int(match.group(1))
+            huisnummer = int(match.group(0))
             
     return {
         "postcode_no_space": postcode_no_space,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 
@@ -111,13 +112,63 @@ def _normalise_postcode(digits: str, letters: str) -> str:
     return f"{digits} {letters.upper()}"
 
 
+# City-normalisation vocabularies (see fact-extraction spec, Postcode Anchor).
+_CITY_LEAD = " \t\r\xa0,\n|"  # leading separators: "Postcode, City" / "Postcode\nCity"
+_CITY_END = frozenset("\n,|()•·;:–—\t")  # boundaries where the city ends
+_CITY_BOILERPLATE_RE = re.compile(
+    r"\b(kvk|btw|vat|tel|telefoon|phone|fax|e-?mail|©|copyright)\b",
+    re.IGNORECASE,
+)
+# Trailing country suffix, spaced or fused (e.g. "MaarsbergenThe Netherlands").
+# Bare "NL" and "Holland" are deliberately excluded — too risky to strip blindly.
+_CITY_COUNTRY_RE = re.compile(
+    r"\s*(the\s+netherlands|netherlands|nederland)\s*$",
+    re.IGNORECASE,
+)
+
+
 def _strip_city(text: str) -> str:
-    """Trim city context: take up to the first hard delimiter."""
-    for ch in ("\n", ",", "|", "(", "\t"):
-        idx = text.find(ch)
-        if idx != -1:
-            text = text[:idx]
-    return text.strip(" \t\r\xa0")
+    """Normalise the post-postcode context into a clean city, or empty string.
+
+    Order: HTML-unescape, strip leading separators, cut at the first end boundary,
+    cut at a boilerplate label, then strip a trailing country suffix.
+    """
+    text = html.unescape(text)
+    text = text.lstrip(_CITY_LEAD)
+    for i, ch in enumerate(text):
+        if ch in _CITY_END:
+            text = text[:i]
+            break
+    label = _CITY_BOILERPLATE_RE.search(text)
+    if label:
+        text = text[: label.start()]
+    text = _CITY_COUNTRY_RE.sub("", text)
+    return text.strip(" \t\r\xa0.-")
+
+
+# A prior line qualifies as a city only if it is short and free of digits.
+_CITY_PRIOR_RE = re.compile(r"^[A-Za-zÀ-ÿ'’.\- ]{2,40}$")
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _recover_prior_city(before: str) -> str | None:
+    """Recover a city from a ``City\\nStreet+houseno\\nPostcode`` layout.
+
+    Conservative: accept the second-to-last non-empty line only when the last
+    line (the street) carries a house number and the prior line looks like a
+    place name. On any doubt return None — a wrong city is worse than null when
+    a postcode is already present.
+    """
+    lines = [ln.strip(" \t\r\xa0") for ln in before.rstrip(" \t\r\n\xa0").split("\n")]
+    lines = [ln for ln in lines if ln]
+    if len(lines) < 2:
+        return None
+    street, city = lines[-1], lines[-2]
+    if not _HAS_DIGIT_RE.search(street):
+        return None
+    if _HAS_DIGIT_RE.search(city) or not _CITY_PRIOR_RE.match(city):
+        return None
+    return city
 
 
 def _strip_street(text: str) -> str:
@@ -150,6 +201,8 @@ def _extract_candidates(text: str, surface: str) -> list[Candidate]:
 
         street_raw = _strip_street(before)
         city_raw = _strip_city(after)
+        if not city_raw:
+            city_raw = _recover_prior_city(before) or ""
 
         snippet_start = max(0, start - CONTEXT_BEFORE)
         snippet_end = min(len(text), end + CONTEXT_AFTER)

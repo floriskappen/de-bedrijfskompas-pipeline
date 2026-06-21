@@ -124,6 +124,61 @@ def test_postcode_in_email_rejected() -> None:
     assert result["address"]["postcode"] is None
 
 
+# ---------------------------------------------------------------------------
+# address.py: city normalisation
+# ---------------------------------------------------------------------------
+
+
+def test_city_after_leading_comma_recovered() -> None:
+    meta = _meta(footer_text="Europalaan 100\n3584 CB, Utrecht")
+    assert _proc(meta)["address"]["city"] == "Utrecht"
+
+
+def test_city_on_next_line_recovered() -> None:
+    meta = _meta(footer_text="Europalaan 100\n3584 CB\nUtrecht")
+    assert _proc(meta)["address"]["city"] == "Utrecht"
+
+
+def test_city_bullet_and_boilerplate_trimmed() -> None:
+    meta = _meta(footer_text="3584 CB Utrecht • KVK: 97376019 • BTW: NL868025")
+    assert _proc(meta)["address"]["city"] == "Utrecht"
+
+
+def test_city_closing_paren_ends_city() -> None:
+    meta = _meta(footer_text="3584 CB Utrecht) is gespecialiseerd in AI-consultancy")
+    assert _proc(meta)["address"]["city"] == "Utrecht"
+
+
+def test_city_boilerplate_label_without_bullet_trimmed() -> None:
+    meta = _meta(footer_text="3584 CB Utrecht KVK: 97376019")
+    assert _proc(meta)["address"]["city"] == "Utrecht"
+
+
+def test_city_fused_country_suffix_stripped() -> None:
+    meta = _meta(footer_text="3953 MJ MaarsbergenThe Netherlands")
+    assert _proc(meta)["address"]["city"] == "Maarsbergen"
+
+
+def test_city_spaced_country_suffix_stripped() -> None:
+    meta = _meta(footer_text="3811 NJ Amersfoort The Netherlands")
+    assert _proc(meta)["address"]["city"] == "Amersfoort"
+
+
+def test_city_html_entity_decoded() -> None:
+    meta = _meta(footer_text="3811 NJ Amersfoort&nbsp;")
+    assert _proc(meta)["address"]["city"] == "Amersfoort"
+
+
+def test_city_recovered_from_line_before_street() -> None:
+    meta = _meta(footer_text="Amersfoort\nKoningstraat 1\n1234 AB")
+    assert _proc(meta)["address"]["city"] == "Amersfoort"
+
+
+def test_prior_line_recovery_declines_on_noisy_line() -> None:
+    meta = _meta(footer_text="Bel ons op 030-1234567\nKoningstraat 1\n1234 AB")
+    assert _proc(meta)["address"]["city"] is None
+
+
 def test_partial_address() -> None:
     # Only city extractable via LLM fallback
     pages = {"contact": "Wij zijn gevestigd in Utrecht. Neem contact op via info@acme.example."}
