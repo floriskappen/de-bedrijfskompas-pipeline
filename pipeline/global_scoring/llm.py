@@ -67,6 +67,9 @@ def call(
                     "messages": messages,
                     "temperature": temperature,
                     "response_format": {"type": "json_object"},
+                    # Wafer intermittently corrupts DeepSeek V4 output values
+                    # (observed as {"en": ":"}), so do not route calls to it.
+                    "provider": {"ignore": ["wafer"]},
                 },
                 timeout=90.0,
             )
