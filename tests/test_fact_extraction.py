@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -441,8 +442,15 @@ def test_llm_error_distinct_from_empty() -> None:
     assert all(v is None for v in result["address"].values())
 
 
-def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
+def test_one_llm_failure_does_not_abort_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: One LLM failure does not abort batch (concurrent, two-phase).
+
+    Failure is keyed off a marker in the company's disambiguation messages, not
+    call order, so the assertion holds under the concurrent pool. Alpha resolves
+    via regex (Phase 1, no LLM); Beta and Gamma both disambiguate (Phase 2 pool).
+    """
     content_dir = tmp_path / "content-collection"
+    monkeypatch.setenv("FACT_EXTRACTION_CONCURRENCY", "4")
 
     def _make_company(name: str, footer: str) -> None:
         from pipeline.website_resolution import company_id
@@ -452,8 +460,8 @@ def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
         (d / "_meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
     _make_company("Alpha B.V.", "Straat 1, 1234 AA Amsterdam")
-    _make_company("Beta B.V.", "Straat 1, 1234 AA Amsterdam\nStraat 2, 5678 BB Rotterdam")
-    _make_company("Gamma B.V.", "Straat 3, 9999 ZZ Groningen")
+    _make_company("Beta B.V.", "FAILME Straat 1, 1234 AA Amsterdam\nStraat 2, 5678 BB Rotterdam")
+    _make_company("Gamma B.V.", "Straat 5, 5555 XX Eindhoven\nStraat 6, 6666 YY Arnhem")
 
     records = [
         {"name": "Alpha B.V.", "website": "https://alpha.example"},
@@ -461,23 +469,55 @@ def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
         {"name": "Gamma B.V.", "website": "https://gamma.example"},
     ]
 
-    call_count = 0
-
-    def flaky_call(messages, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise LLMError("second company fails")
+    def flaky_call(messages, **kwargs):  # noqa: ANN001
+        if "FAILME" in json.dumps(messages):
+            raise LLMError("beta fails")
         return {"hq_index": 0}
 
     out_dir = tmp_path / "fact-extraction"
     with patch("pipeline.fact_extraction.core.llm_module.call", side_effect=flaky_call):
         results = list(run(records, out_dir=out_dir, write=False, content_dir=content_dir))
 
-    statuses = [r["status"] for r in results]
-    assert statuses[0] == "regex_single"
-    assert statuses[1] == "llm_error"
-    assert statuses[2] == "regex_single"
+    by_name = {r["name"]: r for r in results}
+    assert by_name["Alpha B.V."]["status"] == "regex_single"
+    assert by_name["Beta B.V."]["status"] == "llm_error"
+    assert by_name["Gamma B.V."]["status"] == "regex_disambiguated"
+
+
+def test_concurrent_yields_input_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: Concurrent processing yields in input order (two-phase).
+
+    Both companies defer to the disambiguation LLM (Phase 2); the first is slowed.
+    Even though the second completes first, ``run()`` yields the first first.
+    """
+    content_dir = tmp_path / "content-collection"
+    monkeypatch.setenv("FACT_EXTRACTION_CONCURRENCY", "4")
+
+    def _make_company(name: str, footer: str) -> None:
+        from pipeline.website_resolution import company_id
+        d = content_dir / company_id(name)
+        d.mkdir(parents=True)
+        meta = {"name": name, "website": "https://example.com", "status": "ok", "footer_text": footer}
+        (d / "_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    _make_company("Slow Co B.V.", "SLOWMARKER Straat 1, 1234 AA Amsterdam\nStraat 2, 5678 BB Rotterdam")
+    _make_company("Fast Co B.V.", "FASTMARKER Straat 5, 5555 XX Eindhoven\nStraat 6, 6666 YY Arnhem")
+
+    records = [
+        {"name": "Slow Co B.V.", "website": "https://slow.example"},
+        {"name": "Fast Co B.V.", "website": "https://fast.example"},
+    ]
+
+    def _slow_first(messages, **kwargs):  # noqa: ANN001
+        if "SLOWMARKER" in json.dumps(messages):
+            time.sleep(0.3)
+        return {"hq_index": 0}
+
+    out_dir = tmp_path / "fact-extraction"
+    with patch("pipeline.fact_extraction.core.llm_module.call", side_effect=_slow_first):
+        results = list(run(records, out_dir=out_dir, write=False, content_dir=content_dir))
+
+    assert [r["name"] for r in results] == ["Slow Co B.V.", "Fast Co B.V."]
 
 
 # ---------------------------------------------------------------------------

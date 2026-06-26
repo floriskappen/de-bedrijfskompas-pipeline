@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pipeline.website_resolution import company_id
@@ -15,6 +17,7 @@ DEFAULT_SOURCE_DIRS: dict[str, Path] = {
     "tagline-extraction": Path("data/tagline-extraction"),
     "global-scoring": Path("data/global-scoring"),
 }
+DEFAULT_CONCURRENCY = 8
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,18 @@ def process(
     return result
 
 
+def _resolve_concurrency() -> int:
+    """Bound the per-stage LLM pool: ``TRANSLATION_CONCURRENCY`` env, default 8."""
+    raw = os.environ.get("TRANSLATION_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_CONCURRENCY
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_CONCURRENCY
+    return max(1, n)
+
+
 def run(
     companies: Iterable[tuple[str, str | None]],
     *,
@@ -67,14 +82,32 @@ def run(
     offline: bool = False,
     source_dirs: dict[str, Path] | None = None,
 ) -> Iterator[dict]:
-    """Yield one translation record per company. Never raises on per-company errors."""
-    for name, website in companies:
+    """Yield one translation record per company, in input order. Never raises on per-company errors.
+
+    Companies are processed concurrently in a bounded pool (``TRANSLATION_CONCURRENCY``);
+    results are reassembled and yielded in input order. Per-company failures are
+    isolated as records rather than aborting the batch.
+    """
+    company_list = list(companies)
+
+    def _one(company: tuple[str, str | None]) -> dict:
+        name, website = company
         try:
-            yield process(name, website, out_dir=out_dir, write=write, offline=offline, source_dirs=source_dirs)
+            return process(name, website, out_dir=out_dir, write=write, offline=offline, source_dirs=source_dirs)
         except Exception as exc:
             failed = _record(name, website, status="upstream_failed")
             failed["_error"] = str(exc)
-            yield failed
+            return failed
+
+    concurrency = _resolve_concurrency()
+    if concurrency <= 1 or len(company_list) <= 1:
+        for company in company_list:
+            yield _one(company)
+        return
+
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        for result in ex.map(_one, company_list):
+            yield result
 
 
 # ---------------------------------------------------------------------------

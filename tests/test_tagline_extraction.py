@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,29 +138,56 @@ def test_llm_error_recorded() -> None:
     assert result["tagline"] == {"en": None}
 
 
-def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
-    """Scenario: One LLM failure does not abort batch."""
+def test_one_llm_failure_does_not_abort_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: One LLM failure does not abort batch (concurrent).
+
+    Failure is keyed off the company identity carried in the messages, not call
+    order, so the assertion holds under the concurrent pool.
+    """
     names = ("Alpha B.V.", "Beta B.V.", "Gamma B.V.")
     for n in names:
-        _dossier(tmp_path, n)
+        _dossier(tmp_path, n, body=f"{n} supplies widgets to builders.")
     records = [_meta(name=n) for n in names]
+    monkeypatch.setenv("TAGLINE_EXTRACTION_CONCURRENCY", "4")
 
-    call_log: list[int] = []
-
-    def _maybe_fail(messages, **kwargs):  # noqa: ANN001
-        call_log.append(1)
-        if len(call_log) == 2:
-            raise LLMError("second fails")
+    def _fail_for_beta(messages, **kwargs):  # noqa: ANN001
+        if "Beta B.V." in json.dumps(messages):
+            raise LLMError("beta fails")
         return _TAGLINE
 
     out_dir = tmp_path / "out"
-    with patch.object(core_module.llm_module, "call", _maybe_fail):
+    with patch.object(core_module.llm_module, "call", _fail_for_beta):
         results = list(run(records, out_dir=out_dir, write=True, content_dir=tmp_path))
 
-    statuses = [r["status"] for r in results]
-    assert statuses.count("ok") == 2
-    assert statuses.count("llm_error") == 1
+    by_name = {r["name"]: r for r in results}
+    assert by_name["Alpha B.V."]["status"] == "ok"
+    assert by_name["Beta B.V."]["status"] == "llm_error"
+    assert by_name["Gamma B.V."]["status"] == "ok"
     assert len(list(out_dir.glob("*.json"))) == 3  # llm_error still writes a file
+
+
+def test_concurrent_yields_input_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: Concurrent processing yields in input order.
+
+    The first company's LLM call is slowed; the second's is instant. Even though
+    the second completes first, ``run()`` yields the first company's record first.
+    """
+    names = ("Slow Co B.V.", "Fast Co B.V.")
+    _dossier(tmp_path, names[0], body="SLOWMARKER supplies widgets to builders.")
+    _dossier(tmp_path, names[1], body="FASTMARKER supplies widgets to builders.")
+    records = [_meta(name=n) for n in names]
+    monkeypatch.setenv("TAGLINE_EXTRACTION_CONCURRENCY", "4")
+
+    def _slow_first(messages, **kwargs):  # noqa: ANN001
+        if "SLOWMARKER" in json.dumps(messages):
+            time.sleep(0.3)
+        return _TAGLINE
+
+    out_dir = tmp_path / "out"
+    with patch.object(core_module.llm_module, "call", _slow_first):
+        results = list(run(records, out_dir=out_dir, write=True, content_dir=tmp_path))
+
+    assert [r["name"] for r in results] == list(names)
 
 
 def test_prompt_loaded_from_file() -> None:
@@ -187,6 +215,19 @@ def test_model_override_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
         out = llm_module.call([{"role": "user", "content": "hi"}])
     assert out == {"en": "a shop"}
     assert captured["model"] == "test/override-model"
+
+
+def test_wafer_provider_excluded() -> None:
+    captured: dict = {}
+
+    def _fake_post(url, **kwargs):  # noqa: ANN001
+        captured["provider"] = kwargs["json"]["provider"]
+        return _FakeResp('{"en": "a shop"}')
+
+    with patch.object(llm_module.httpx, "post", _fake_post):
+        llm_module.call([{"role": "user", "content": "hi"}])
+
+    assert captured["provider"] == {"ignore": ["wafer"]}
 
 
 def test_malformed_response_is_error() -> None:

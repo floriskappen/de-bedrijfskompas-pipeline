@@ -7,6 +7,7 @@ All tests are offline (no LLM calls) except the @pytest.mark.network ones.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -221,30 +222,57 @@ def test_llm_error_recorded(tmp_path: Path) -> None:
     assert result["status"] == "llm_error"
 
 
-def test_one_failure_does_not_abort_batch(tmp_path: Path) -> None:
-    """Scenario: One company LLM error, others succeed."""
+def test_one_failure_does_not_abort_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: One company LLM error, others succeed (concurrent).
+
+    Failure is keyed off a marker in the company's tagline text (carried into the
+    messages), not call order, so the assertion holds under the concurrent pool.
+    """
     names = ["Alpha B.V.", "Beta B.V.", "Gamma B.V."]
     for n in names:
-        _tagline_file(tmp_path, n)
+        en = "BETAMARKER A shop." if n == "Beta B.V." else f"{n} shop."
+        _tagline_file(tmp_path, n, en=en)
     src = _source_dirs(tmp_path)
-    call_log: list[int] = []
+    monkeypatch.setenv("TRANSLATION_CONCURRENCY", "4")
 
-    def _maybe_fail(messages, *, expected_keys, **kw):
-        call_log.append(1)
-        if len(call_log) == 2:
-            raise LLMError("second fails")
+    def _fail_for_beta(messages, *, expected_keys, **kw):  # noqa: ANN001
+        if "BETAMARKER" in json.dumps(messages):
+            raise LLMError("beta fails")
         return {k: "Dutch." for k in expected_keys}
 
     out_dir = tmp_path / "out"
-    with patch.object(core_module.llm_module, "call", side_effect=_maybe_fail):
+    with patch.object(core_module.llm_module, "call", side_effect=_fail_for_beta):
         results = list(run(
             [(n, None) for n in names],
             out_dir=out_dir, write=True, source_dirs=src,
         ))
-    statuses = [r["status"] for r in results]
-    assert statuses.count("ok") == 2
-    assert statuses.count("llm_error") == 1
+    by_name = {r["name"]: r for r in results}
+    assert by_name["Alpha B.V."]["status"] == "ok"
+    assert by_name["Beta B.V."]["status"] == "llm_error"
+    assert by_name["Gamma B.V."]["status"] == "ok"
     assert len(list(out_dir.glob("*.json"))) == 3
+
+
+def test_concurrent_yields_input_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: Concurrent processing yields in input order."""
+    names = ("Slow Co B.V.", "Fast Co B.V.")
+    _tagline_file(tmp_path, names[0], en="SLOWMARKER A shop.")
+    _tagline_file(tmp_path, names[1], en="FASTMARKER A shop.")
+    src = _source_dirs(tmp_path)
+    monkeypatch.setenv("TRANSLATION_CONCURRENCY", "4")
+
+    def _slow_first(messages, *, expected_keys, **kw):  # noqa: ANN001
+        if "SLOWMARKER" in json.dumps(messages):
+            time.sleep(0.3)
+        return {k: "Dutch." for k in expected_keys}
+
+    out_dir = tmp_path / "out"
+    with patch.object(core_module.llm_module, "call", side_effect=_slow_first):
+        results = list(run(
+            [(n, None) for n in names],
+            out_dir=out_dir, write=True, source_dirs=src,
+        ))
+    assert [r["name"] for r in results] == list(names)
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,27 +162,52 @@ def test_llm_error_recorded() -> None:
     assert result["body"] == ""
 
 
-def test_one_llm_failure_does_not_abort_batch(tmp_path: Path) -> None:
+def test_one_llm_failure_does_not_abort_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: One LLM failure does not abort batch (concurrent).
+
+    Failure is keyed off a marker in the company's page content (carried into the
+    messages), not call order, so the assertion holds under the concurrent pool.
+    """
     for name in ("Alpha B.V.", "Beta B.V.", "Gamma B.V."):
-        _company_dir(tmp_path, company_id(name), {"index.md": "content"}, _meta(name=name))
+        marker = "BETAMARKER " if name == "Beta B.V." else ""
+        _company_dir(tmp_path, company_id(name), {"index.md": f"{marker}content for {name}."}, _meta(name=name))
     records = [_meta(name=n) for n in ("Alpha B.V.", "Beta B.V.", "Gamma B.V.")]
+    monkeypatch.setenv("CONTENT_SUMMARIZATION_CONCURRENCY", "4")
 
-    call_log: list[int] = []
-
-    def _maybe_fail(messages, **kwargs):  # noqa: ANN001
-        call_log.append(1)
-        if len(call_log) == 2:
-            raise LLMError("second fails")
+    def _fail_for_beta(messages, **kwargs):  # noqa: ANN001
+        if "BETAMARKER" in json.dumps(messages):
+            raise LLMError("beta fails")
         return "# Dossier\n\nbody"
 
     out_dir = tmp_path / "out"
-    with patch.object(core_module.llm_module, "call", _maybe_fail):
+    with patch.object(core_module.llm_module, "call", _fail_for_beta):
         results = list(run(records, out_dir=out_dir, write=True, content_dir=tmp_path))
 
-    statuses = [r["status"] for r in results]
-    assert statuses.count("ok") == 2
-    assert statuses.count("llm_error") == 1
+    by_name = {r["name"]: r for r in results}
+    assert by_name["Alpha B.V."]["status"] == "ok"
+    assert by_name["Beta B.V."]["status"] == "llm_error"
+    assert by_name["Gamma B.V."]["status"] == "ok"
     assert len(list(out_dir.glob("*.md"))) == 3  # llm_error still writes a file
+
+
+def test_concurrent_yields_input_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: Concurrent processing yields in input order."""
+    names = ("Slow Co B.V.", "Fast Co B.V.")
+    _company_dir(tmp_path, company_id(names[0]), {"index.md": "SLOWMARKER content."}, _meta(name=names[0]))
+    _company_dir(tmp_path, company_id(names[1]), {"index.md": "FASTMARKER content."}, _meta(name=names[1]))
+    records = [_meta(name=n) for n in names]
+    monkeypatch.setenv("CONTENT_SUMMARIZATION_CONCURRENCY", "4")
+
+    def _slow_first(messages, **kwargs):  # noqa: ANN001
+        if "SLOWMARKER" in json.dumps(messages):
+            time.sleep(0.3)
+        return "# Dossier\n\nbody"
+
+    out_dir = tmp_path / "out"
+    with patch.object(core_module.llm_module, "call", _slow_first):
+        results = list(run(records, out_dir=out_dir, write=True, content_dir=tmp_path))
+
+    assert [r["name"] for r in results] == list(names)
 
 
 def test_offline_mode_short_circuits_llm() -> None:

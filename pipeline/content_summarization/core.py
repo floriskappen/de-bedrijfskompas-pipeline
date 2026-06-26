@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pipeline.website_resolution import company_id
@@ -14,6 +16,7 @@ from . import llm as llm_module
 INPUT_CHAR_LIMIT = 24000  # cap on the concatenated page text fed to the LLM
 
 DEFAULT_CONTENT_DIR = Path("data/content-collection")
+DEFAULT_CONCURRENCY = 8
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "content-summarization.md"
 
@@ -73,6 +76,18 @@ def process(
     return result
 
 
+def _resolve_concurrency() -> int:
+    """Bound the per-stage LLM pool: ``CONTENT_SUMMARIZATION_CONCURRENCY`` env, default 8."""
+    raw = os.environ.get("CONTENT_SUMMARIZATION_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_CONCURRENCY
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_CONCURRENCY
+    return max(1, n)
+
+
 def run(
     records: Iterable[dict],
     *,
@@ -81,16 +96,34 @@ def run(
     offline: bool = False,
     content_dir: Path | None = None,
 ) -> Iterator[dict]:
-    """Yield one dossier record per company. Never raises on per-company load errors."""
+    """Yield one dossier record per company, in input order. Never raises on per-company load errors.
+
+    Companies are processed concurrently in a bounded pool
+    (``CONTENT_SUMMARIZATION_CONCURRENCY``); results are reassembled and yielded
+    in input order. Per-company failures are isolated as records rather than
+    aborting the batch.
+    """
     src = content_dir if content_dir is not None else DEFAULT_CONTENT_DIR
-    for record in records:
+    record_list = list(records)
+
+    def _one(record: dict) -> dict:
         try:
             meta, pages = _load_company(record, content_dir=src)
-            yield process(meta, pages, out_dir=out_dir, write=write, offline=offline)
+            return process(meta, pages, out_dir=out_dir, write=write, offline=offline)
         except Exception as exc:
             failed = _record(record, status="upstream_failed", body="", source_language=None)
             failed["_error"] = str(exc)
-            yield failed
+            return failed
+
+    concurrency = _resolve_concurrency()
+    if concurrency <= 1 or len(record_list) <= 1:
+        for record in record_list:
+            yield _one(record)
+        return
+
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        for result in ex.map(_one, record_list):
+            yield result
 
 
 # ---------------------------------------------------------------------------

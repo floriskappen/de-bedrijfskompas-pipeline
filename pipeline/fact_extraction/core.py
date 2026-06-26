@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+import os
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.website_resolution import company_id
@@ -68,8 +71,40 @@ def process(
     offline: bool = False,
     visible_pages: dict[str, str] | None = None,
 ) -> dict:
-    """Extract facts for a single company. Never raises."""
+    """Extract facts for a single company. Never raises (except company-id collision in _write).
 
+    Thin driver over :func:`_decide`: runs the sync decision phase, then executes
+    any deferred LLM work inline. Batch callers should use :func:`run`, which
+    pools only the deferred items.
+    """
+    decision = _decide(
+        meta,
+        pages,
+        out_dir=out_dir,
+        write=write,
+        offline=offline,
+        visible_pages=visible_pages,
+    )
+    if isinstance(decision, _Deferred):
+        return decision.run()
+    return decision
+
+
+def _decide(
+    meta: dict,
+    pages: dict[str, str],
+    *,
+    out_dir: Path,
+    write: bool,
+    offline: bool = False,
+    visible_pages: dict[str, str] | None = None,
+) -> dict | _Deferred:
+    """Run the sync decision phase for one company.
+
+    Returns a completed result dict (already written when *write* is set) for the
+    regex/empty/offline/upstream paths, or a :class:`_Deferred` carrying the
+    LLM-bound work (disambiguation or prose fallback) for the pool to execute.
+    """
     upstream_status = meta.get("status", "")
     if upstream_status in ("upstream_failed", "fetch_failed"):
         result = _skeleton(meta, status="upstream_failed")
@@ -83,8 +118,11 @@ def process(
 
     if len(candidates) == 1:
         result = _from_candidate(meta, candidates[0], status="regex_single")
+        if write:
+            _write(result, out_dir=out_dir)
+        return result
 
-    elif len(candidates) > 1:
+    if len(candidates) > 1:
         # Sole-boost shortcut: if exactly one candidate has a boost and no others do
         boosted = [c for c in candidates if c.boost]
         non_boosted = [c for c in candidates if not c.boost]
@@ -96,25 +134,62 @@ def process(
             # In offline mode use the top-ranked candidate if a sole-boost exists
             result = _from_candidate(meta, candidates[0], status="regex_single") if boosted else _empty(meta)
         else:
-            result = _disambiguate(meta, candidates[:DISAMBIG_MAX_CANDIDATES])
+            chosen = candidates[:DISAMBIG_MAX_CANDIDATES]
+            return _Deferred(
+                meta,
+                lambda: _disambiguate_and_write(meta, chosen, out_dir=out_dir, write=write),
+            )
 
-    else:
-        # Zero candidates
-        if offline:
-            result = _empty(meta)
-        else:
-            surface = _build_fallback_surface(footer_text, pages)
-            if not surface.strip():
-                result = _empty(meta)
-            else:
-                result = _llm_fallback(meta, footer_text, pages)
+        if write:
+            _write(result, out_dir=out_dir)
+        return result
 
-    if write:
-        _write(result, out_dir=out_dir)
-    return result
+    # Zero candidates
+    if offline:
+        result = _empty(meta)
+        if write:
+            _write(result, out_dir=out_dir)
+        return result
+
+    surface = _build_fallback_surface(footer_text, pages)
+    if not surface.strip():
+        result = _empty(meta)
+        if write:
+            _write(result, out_dir=out_dir)
+        return result
+
+    return _Deferred(
+        meta,
+        lambda: _llm_fallback_and_write(meta, footer_text, pages, out_dir=out_dir, write=write),
+    )
 
 
 DEFAULT_CONTENT_DIR = Path("data/content-collection")
+DEFAULT_CONCURRENCY = 8
+
+
+@dataclass
+class _Deferred:
+    """An LLM-bound work item deferred from the decision phase.
+
+    Carries the company ``meta`` (for failure-record construction) and a ``run``
+    thunk that performs the LLM call and writes the result when ``write`` is set.
+    """
+
+    meta: dict
+    run: Callable[[], dict]
+
+
+def _resolve_concurrency() -> int:
+    """Bound the per-stage LLM pool: ``FACT_EXTRACTION_CONCURRENCY`` env, default 8."""
+    raw = os.environ.get("FACT_EXTRACTION_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_CONCURRENCY
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_CONCURRENCY
+    return max(1, n)
 
 
 def run(
@@ -125,23 +200,61 @@ def run(
     offline: bool = False,
     content_dir: Path | None = None,
 ) -> Iterator[dict]:
-    """Yield one fact record per company. Never raises on per-company errors."""
+    """Yield one fact record per company, in input order. Never raises on per-company errors.
+
+    Two-phase: the sync decision phase (load + candidate extraction + branch) runs
+    first for every company, writing regex/empty/upstream-failed results immediately;
+    only the LLM-bound companies (disambiguation / prose fallback) are then sent to a
+    bounded pool (``FACT_EXTRACTION_CONCURRENCY``). Results are yielded in input order.
+    """
     src = content_dir if content_dir is not None else DEFAULT_CONTENT_DIR
-    for record in records:
+    record_list = list(records)
+
+    # Phase 1: load + decide, sequentially. Each company resolves to either a
+    # completed result dict (already written when write is set) or a _Deferred
+    # LLM work item for the pool.
+    slots: list[dict | _Deferred] = []
+    for record in record_list:
         try:
             meta, pages, visible_pages = _load_company(record, out_dir=src)
-            yield process(
-                meta,
-                pages,
-                out_dir=out_dir,
-                write=write,
-                offline=offline,
-                visible_pages=visible_pages,
+            slots.append(
+                _decide(
+                    meta,
+                    pages,
+                    out_dir=out_dir,
+                    write=write,
+                    offline=offline,
+                    visible_pages=visible_pages,
+                )
             )
         except Exception as exc:
             failed = _skeleton(record, status="upstream_failed")
             failed["_error"] = str(exc)
-            yield failed
+            slots.append(failed)
+
+    # Phase 2: run only the deferred LLM items in a bounded pool.
+    deferred = [(i, s) for i, s in enumerate(slots) if isinstance(s, _Deferred)]
+    if deferred:
+        def _execute(d: _Deferred) -> dict:
+            try:
+                return d.run()
+            except Exception as exc:
+                failed = _skeleton(d.meta, status="upstream_failed")
+                failed["_error"] = str(exc)
+                return failed
+
+        concurrency = _resolve_concurrency()
+        if concurrency <= 1:
+            for i, d in deferred:
+                slots[i] = _execute(d)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                results = list(ex.map(_execute, [s for _, s in deferred]))
+            for (i, _), result in zip(deferred, results):
+                slots[i] = result
+
+    for slot in slots:
+        yield slot
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +291,26 @@ def _llm_fallback(
         return result
     except llm_module.LLMError:
         return _skeleton(meta, status="llm_error")
+
+
+def _disambiguate_and_write(
+    meta: dict, candidates: list[Candidate], *, out_dir: Path, write: bool
+) -> dict:
+    """Execute the disambiguation LLM call and persist the result (deferred-phase thunk)."""
+    result = _disambiguate(meta, candidates)
+    if write:
+        _write(result, out_dir=out_dir)
+    return result
+
+
+def _llm_fallback_and_write(
+    meta: dict, footer_text: str | None, pages: dict[str, str], *, out_dir: Path, write: bool
+) -> dict:
+    """Execute the prose-fallback LLM call and persist the result (deferred-phase thunk)."""
+    result = _llm_fallback(meta, footer_text, pages)
+    if write:
+        _write(result, out_dir=out_dir)
+    return result
 
 
 def _build_fallback_surface(footer_text: str | None, pages: dict[str, str]) -> str:

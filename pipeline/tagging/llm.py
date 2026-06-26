@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import time
 
 import httpx
 
@@ -166,6 +168,46 @@ class LLMError(Exception):
     """Raised when the LLM call fails after retries."""
 
 
+_RETRY_BASE_SECONDS = 0.5
+_RETRY_CAP_SECONDS = 30.0
+
+
+def _rate_limit_response(exc: Exception) -> httpx.Response | None:
+    """Return the response if *exc* is a 429/5xx HTTP status error, else None."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        status = exc.response.status_code
+        if status == 429 or 500 <= status < 600:
+            return exc.response
+    return None
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    val = response.headers.get("Retry-After")
+    if not val:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _backoff_sleep(attempt: int, response: httpx.Response | None) -> None:
+    """Exponential backoff with full jitter; honour ``Retry-After`` on 429/5xx.
+
+    Full jitter (AWS-style): uniform in ``[0, min(cap, base * 2**attempt))]``.
+    When the failure carries a ``Retry-After`` header, the sleep is never shorter
+    than the server-requested delay. Transport/decode errors (no response) back
+    off with jitter only.
+    """
+    upper = min(_RETRY_CAP_SECONDS, _RETRY_BASE_SECONDS * (2 ** attempt))
+    sleep = random.uniform(0, upper)
+    if response is not None:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            sleep = max(sleep, retry_after)
+    time.sleep(sleep)
+
+
 def resolve_model(model: str | None = None) -> str:
     """Resolve the model id: explicit arg, then env override, then default."""
     return model or os.environ.get("TAGGING_MODEL", DEFAULT_MODEL)
@@ -214,6 +256,7 @@ def call(
             last_exc = exc
             if attempt == retries:
                 break
+            _backoff_sleep(attempt, _rate_limit_response(exc))
 
     raise LLMError(f"LLM call failed after {retries + 1} attempts: {last_exc}") from last_exc
 
