@@ -69,6 +69,22 @@ def exact(postcode: str, huisnummer: int, timeout: float = 5.0) -> dict | None:
     fq_filters = ["type:adres", f"postcode:{postcode}", f"huisnummer:{huisnummer}"]
     return _query_pdok(fq_filters, timeout=timeout)
 
+def street(straatnaam: str, huisnummer: int, woonplaatsnaam: str, timeout: float = 5.0) -> dict | None:
+    """Query PDOK street-and-huisnummer tier (rooftop, no postcode required).
+
+    Values are quoted as Lucene phrase queries so multi-word street/city names
+    (e.g. ``"Van Heuven Goedhartlaan"``, ``"Den Haag"``) and incidental special
+    characters in a garbled ``straatnaam`` resolve to a clean ``numFound: 0``
+    miss rather than a 400. Still strict ``fq`` filtering — no free-text ``q``.
+    """
+    fq_filters = [
+        "type:adres",
+        f'straatnaam:"{straatnaam}"',
+        f"huisnummer:{huisnummer}",
+        f'woonplaatsnaam:"{woonplaatsnaam}"',
+    ]
+    return _query_pdok(fq_filters, timeout=timeout)
+
 def postcode_centroid(postcode: str, timeout: float = 5.0) -> dict | None:
     """Query PDOK postcode centroid tier."""
     fq_filters = ["type:postcode", f"postcode:{postcode}"]

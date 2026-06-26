@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import pytest
 from pathlib import Path
 
@@ -31,9 +32,10 @@ class MockResponse:
 
 # Mock PDOK Client for core tests
 class MockPDOKClient:
-    def __init__(self, exact_res=None, postcode_res=None, should_raise=False):
+    def __init__(self, exact_res=None, postcode_res=None, street_res=None, should_raise=False):
         self.exact_res = exact_res
         self.postcode_res = postcode_res
+        self.street_res = street_res
         self.should_raise = should_raise
         self.calls = []
 
@@ -42,6 +44,12 @@ class MockPDOKClient:
         if self.should_raise:
             raise pdok.PDOKError("Mock error")
         return self.exact_res
+
+    def street(self, straatnaam, huisnummer, woonplaatsnaam):
+        self.calls.append(("street", straatnaam, huisnummer, woonplaatsnaam))
+        if self.should_raise:
+            raise pdok.PDOKError("Mock error")
+        return self.street_res
 
     def postcode_centroid(self, postcode):
         self.calls.append(("postcode_centroid", postcode))
@@ -83,6 +91,25 @@ def test_pdok_error_propagated(monkeypatch: pytest.MonkeyPatch) -> None:
     
     with pytest.raises(pdok.PDOKError):
         pdok.exact("3584DW", 771)
+
+def test_street_query_builds_strict_fq(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the street tier builds strict fq filters (type/straatnaam/huisnummer/woonplaatsnaam), no free-text q."""
+    captured_url = {}
+
+    def mock_urlopen(req: urllib.request.Request, timeout: float | None = None) -> MockResponse:
+        captured_url["url"] = req.full_url
+        payload = {"response": {"numFound": 1, "docs": [{"centroide_ll": "POINT(5.1 52.0)"}]}}
+        return MockResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    res = pdok.street("Europalaan", 100, "Utrecht")
+    assert res == {"lat": 52.0, "lng": 5.1}
+
+    parsed = urllib.parse.urlparse(captured_url["url"])
+    params = urllib.parse.parse_qs(parsed.query)
+    assert "q" not in params  # no free-text q param
+    assert params["fq"] == ["type:adres", 'straatnaam:"Europalaan"', "huisnummer:100", 'woonplaatsnaam:"Utrecht"']
 
 # ---------------------------------------------------------------------------
 # Address Preparation Tests
@@ -126,6 +153,23 @@ def test_no_digit_street_has_no_house_number() -> None:
     addr = {"street": "<br>", "postcode": "3526KS", "city": "Utrecht", "country": "NL"}
     prep = address.prepare(addr)
     assert prep["huisnummer"] is None
+    assert prep["straatnaam"] is None
+    assert prep["skip_reason"] is None
+
+def test_street_name_parsed() -> None:
+    """Verify the street name is parsed as the text before the house-number token."""
+    addr = {"street": "Europalaan 100", "postcode": None, "city": "Utrecht", "country": "NL"}
+    prep = address.prepare(addr)
+    assert prep["straatnaam"] == "Europalaan"
+    assert prep["huisnummer"] == 100
+    assert prep["skip_reason"] is None
+
+def test_garbled_street_yields_street_name() -> None:
+    """Verify a street with trailing postcode/PoBox cruft still yields the street name."""
+    addr = {"street": "Parnassusweg 793, 1082 LZ, P.O. Box 7895", "postcode": "1008 AB", "city": "Amsterdam", "country": "NL"}
+    prep = address.prepare(addr)
+    assert prep["straatnaam"] == "Parnassusweg"
+    assert prep["huisnummer"] == 793
     assert prep["skip_reason"] is None
 
 def test_non_nl_skip_reason() -> None:
@@ -197,35 +241,92 @@ def test_exact_tier_hits(tmp_path: Path) -> None:
     assert res["latlng"] == {"lat": 52.1, "lng": 5.1}
     assert client.calls == [("exact", "3526KS", 100)]
 
-def test_exact_falls_through_to_postcode(tmp_path: Path) -> None:
-    """WHEN the exact tier returns 0 docs, THEN postcode_centroid is attempted."""
+def test_exact_falls_through_to_street(tmp_path: Path) -> None:
+    """WHEN exact is skipped (no postcode) but street+city are present, THEN the street tier hits and postcode_centroid is not attempted."""
+    rec = {
+        "name": "Acme B.V.",
+        "status": "regex_single",
+        "address": {"street": "Europalaan 100", "postcode": None, "city": "Utrecht", "country": "NL"}
+    }
+    client = MockPDOKClient(street_res={"lat": 52.0642, "lng": 5.1085})
+    res = core.process(rec, out_dir=tmp_path, write=False, client=client)
+    assert res["status"] == "ok"
+    assert res["match_quality"] == "street"
+    assert res["latlng"] == {"lat": 52.0642, "lng": 5.1085}
+    assert client.calls == [("street", "Europalaan", 100, "Utrecht")]
+
+def test_street_tier_hits_on_garbled_postcode(tmp_path: Path) -> None:
+    """WHEN exact misses on a PoBox postcode but street+city resolve, THEN street hits and postcode_centroid is not attempted."""
+    rec = {
+        "name": "Acme B.V.",
+        "status": "regex_single",
+        "address": {"street": "Parnassusweg 793", "postcode": "1008 AB", "city": "Amsterdam", "country": "NL"}
+    }
+    client = MockPDOKClient(exact_res=None, street_res={"lat": 52.3375, "lng": 4.8694})
+    res = core.process(rec, out_dir=tmp_path, write=False, client=client)
+    assert res["status"] == "ok"
+    assert res["match_quality"] == "street"
+    assert client.calls == [("exact", "1008AB", 793), ("street", "Parnassusweg", 793, "Amsterdam")]
+
+def test_street_falls_through_to_postcode(tmp_path: Path) -> None:
+    """WHEN exact and street both miss but postcode_centroid hits, THEN postcode_centroid is used."""
     rec = {
         "name": "Acme B.V.",
         "status": "regex_single",
         "address": {"street": "Europalaan 100", "postcode": "3526 KS", "city": "Utrecht", "country": "NL"}
     }
-    client = MockPDOKClient(exact_res=None, postcode_res={"lat": 52.2, "lng": 5.2})
+    client = MockPDOKClient(exact_res=None, street_res=None, postcode_res={"lat": 52.2, "lng": 5.2})
     res = core.process(rec, out_dir=tmp_path, write=False, client=client)
     assert res["status"] == "ok"
     assert res["match_quality"] == "postcode_centroid"
     assert res["latlng"] == {"lat": 52.2, "lng": 5.2}
-    assert client.calls == [("exact", "3526KS", 100), ("postcode_centroid", "3526KS")]
+    assert client.calls == [("exact", "3526KS", 100), ("street", "Europalaan", 100, "Utrecht"), ("postcode_centroid", "3526KS")]
 
-def test_both_tiers_empty_yields_empty_status(tmp_path: Path) -> None:
-    """WHEN both tiers return 0 docs, THEN status=empty, latlng/match_quality/source all null."""
+def test_street_tier_skipped_when_city_missing(tmp_path: Path) -> None:
+    """WHEN street is present but city is null, THEN the street tier is not queried (city needed to disambiguate)."""
+    rec = {
+        "name": "Acme B.V.",
+        "status": "regex_single",
+        "address": {"street": "Europalaan 100", "postcode": "3526 KS", "city": None, "country": "NL"}
+    }
+    client = MockPDOKClient(exact_res=None, postcode_res={"lat": 52.2, "lng": 5.2})
+    res = core.process(rec, out_dir=tmp_path, write=False, client=client)
+    assert res["match_quality"] == "postcode_centroid"
+    assert not any(c[0] == "street" for c in client.calls)
+
+def test_all_tiers_empty(tmp_path: Path) -> None:
+    """WHEN all three tiers return 0 docs, THEN status=empty, latlng/match_quality/source all null."""
     rec = {
         "name": "Acme B.V.",
         "status": "regex_single",
         "address": {"street": "Europalaan 100", "postcode": "3526 KS", "city": "Utrecht", "country": "NL"}
     }
-    client = MockPDOKClient(exact_res=None, postcode_res=None)
+    client = MockPDOKClient(exact_res=None, street_res=None, postcode_res=None)
     res = core.process(rec, out_dir=tmp_path, write=False, client=client)
     assert res["status"] == "empty"
     assert res["latlng"] is None
     assert res["match_quality"] is None
     assert res["source"] is None
     # No whole-city tier: resolution stops after postcode_centroid.
-    assert client.calls == [("exact", "3526KS", 100), ("postcode_centroid", "3526KS")]
+    assert client.calls == [("exact", "3526KS", 100), ("street", "Europalaan", 100, "Utrecht"), ("postcode_centroid", "3526KS")]
+
+def test_successful_street_hit(tmp_path: Path) -> None:
+    """Verify a street-tier hit produces the full output schema: latlng set, match_quality=street, source=pdok, status=ok."""
+    rec = {
+        "name": "Amulet",
+        "status": "regex_single",
+        "address": {"street": "Europalaan 100", "postcode": None, "city": "Utrecht", "country": "NL"}
+    }
+    client = MockPDOKClient(street_res={"lat": 52.06424, "lng": 5.10854})
+    core.process(rec, out_dir=tmp_path, write=True, client=client)
+
+    out_file = tmp_path / "amulet.json"
+    assert out_file.exists()
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["status"] == "ok"
+    assert data["match_quality"] == "street"
+    assert data["source"] == "pdok"
+    assert data["latlng"] == {"lat": 52.06424, "lng": 5.10854}
 
 def test_city_only_address_makes_no_request(tmp_path: Path) -> None:
     """WHEN only a city is available (no postcode), THEN no HTTP call and status=empty."""

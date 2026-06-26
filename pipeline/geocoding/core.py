@@ -51,6 +51,8 @@ def process(
 
     postcode_no_space = prep["postcode_no_space"]
     huisnummer = prep["huisnummer"]
+    straatnaam = prep["straatnaam"]
+    city = prep["city"]
 
     status = None
     latlng = None
@@ -67,7 +69,18 @@ def process(
                 source = "pdok"
                 status = "ok"
 
-        # Tier 2: postcode_centroid
+        # Tier 2: street (straatnaam + huisnummer + woonplaatsnaam). Rooftop-
+        # precise, so it outranks postcode_centroid and avoids a garbled/wrong
+        # postcode (e.g. a PoBox) producing a misleading centroid.
+        if status is None and straatnaam is not None and huisnummer is not None and city is not None:
+            res = client.street(straatnaam, huisnummer, city)
+            if res is not None:
+                latlng = res
+                match_quality = "street"
+                source = "pdok"
+                status = "ok"
+
+        # Tier 3: postcode_centroid
         if status is None and postcode_no_space:
             res = client.postcode_centroid(postcode_no_space)
             if res is not None:
