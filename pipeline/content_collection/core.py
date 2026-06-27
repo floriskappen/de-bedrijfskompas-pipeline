@@ -14,6 +14,10 @@ from . import crawl, extract, fetch, render, sitemap
 
 DEFAULT_INTER_PAGE_SLEEP = 1.0
 MIN_HOMEPAGE_LINKS = 1
+# A 1-2 page crawl whose collected markdown reaches this length is "ok" — a
+# complete-but-small brochure site is not a failure. ~20x the per-page drop
+# threshold (extract.MIN_MARKDOWN_LENGTH = 100).
+MIN_SUBSTANTIAL_CONTENT_CHARS = 2000
 
 
 def _canonical_base(url: str) -> str:
@@ -46,6 +50,7 @@ def process(
     homepage_url = crawl.normalize_homepage(website)
 
     homepage_result = fetch.get(homepage_url)
+    js_site = False  # set when the homepage was rendered headlessly (SPA signal)
     urls_attempted: list[dict] = []
     pages_written: dict[str, str] = {}
     pages_meta: dict[str, dict] = {}
@@ -56,6 +61,7 @@ def process(
         rendered = render.render_homepage(homepage_url)
         if rendered.ok:
             homepage_result = rendered
+            js_site = True
         else:
             error = homepage_result.error
             if rendered.error:
@@ -92,6 +98,7 @@ def process(
         rendered = render.render_homepage(homepage_url)
         if rendered.ok:
             homepage_result = rendered
+            js_site = True
             canonical_url = _canonical_base(rendered.url) if rendered.url else canonical_url
             homepage_html = rendered.html or ""
             footer_text = extract.extract_footer_text(homepage_html)
@@ -147,47 +154,57 @@ def process(
             }
         )
 
-    for idx, (url, slug) in enumerate(selected):
-        if idx == 0:
-            html = homepage_html  # already fetched
-        else:
-            if sleep > 0:
-                time.sleep(sleep)
-            result = fetch.get(url)
-            if not result.ok:
+    renderer = render.PageRenderer() if js_site else None
+    try:
+        for idx, (url, slug) in enumerate(selected):
+            if idx == 0:
+                html = homepage_html  # already fetched
+            else:
+                if sleep > 0:
+                    time.sleep(sleep)
+                # On a detected JS-site, plain-HTTP sub-pages return the empty
+                # SPA shell; render them headlessly too (reusing one browser).
+                result = renderer.render(url) if renderer is not None else fetch.get(url)
+                if not result.ok:
+                    urls_attempted.append(
+                        {
+                            "url": url,
+                            "slug": slug,
+                            "status": "error",
+                            "error": result.error,
+                        }
+                    )
+                    continue
+                html = result.html or ""
+
+            markdown = extract.extract_markdown(html)
+            if crawl.is_address_intent_slug(slug):
+                recall_md = extract.extract_markdown_recall(html)
+                if recall_md and recall_md.strip():
+                    recall_pages[slug] = recall_md
+                visible_md = extract.extract_visible_text(html)
+                if visible_md and visible_md.strip():
+                    visible_pages[slug] = visible_md
+            if not markdown or len(markdown) < extract.MIN_MARKDOWN_LENGTH:
                 urls_attempted.append(
-                    {
-                        "url": url,
-                        "slug": slug,
-                        "status": "error",
-                        "error": result.error,
-                    }
+                    {"url": url, "slug": slug, "status": "dropped_thin"}
                 )
                 continue
-            html = result.html or ""
 
-        markdown = extract.extract_markdown(html)
-        if crawl.is_address_intent_slug(slug):
-            recall_md = extract.extract_markdown_recall(html)
-            if recall_md and recall_md.strip():
-                recall_pages[slug] = recall_md
-            visible_md = extract.extract_visible_text(html)
-            if visible_md and visible_md.strip():
-                visible_pages[slug] = visible_md
-        if not markdown or len(markdown) < extract.MIN_MARKDOWN_LENGTH:
-            urls_attempted.append(
-                {"url": url, "slug": slug, "status": "dropped_thin"}
-            )
-            continue
-
-        pages_written[slug] = markdown
-        page_meta = extract.extract_page_metadata(html)
-        page_meta["url"] = url
-        pages_meta[slug] = page_meta
-        urls_attempted.append({"url": url, "slug": slug, "status": "written"})
+            pages_written[slug] = markdown
+            page_meta = extract.extract_page_metadata(html)
+            page_meta["url"] = url
+            pages_meta[slug] = page_meta
+            urls_attempted.append({"url": url, "slug": slug, "status": "written"})
+    finally:
+        if renderer is not None:
+            renderer.close()
 
     pages_collected = len(pages_written)
-    if pages_collected >= 3:
+    total_content_chars = sum(len(md) for md in pages_written.values())
+    if pages_collected >= 3 or (
+        pages_collected >= 1 and total_content_chars >= MIN_SUBSTANTIAL_CONTENT_CHARS
+    ):
         status = "ok"
     elif pages_collected >= 1:
         status = "thin"

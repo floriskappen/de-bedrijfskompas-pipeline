@@ -196,6 +196,41 @@ def test_select_urls_tier3_fallback() -> None:
     assert base + "/blog" not in urls
 
 
+def test_select_urls_shallow_link_fallback_recovers_nonstandard_path() -> None:
+    base = "https://acme.example"
+    homepage = base + "/"
+    # /learn (depth 1) + two depth-2 non-standard pages; none match a durable/fresh pattern.
+    links = [base + "/learn/roadmaps", base + "/learn/fundamentals", base + "/learn"]
+    selected, _ = select_urls(homepage, links)
+    urls = [u for u, _ in selected]
+    # Homepage + /learn (depth 1) recovered first, then a depth-2 link to reach the minimum.
+    assert base + "/learn" in urls
+    assert base + "/learn/roadmaps" in urls
+    assert urls.index(base + "/learn") < urls.index(base + "/learn/roadmaps")
+    assert len(selected) >= 3
+
+
+def test_select_urls_shallow_link_fallback_does_not_displace_durable() -> None:
+    base = "https://acme.example"
+    homepage = base + "/"
+    links = [base + "/about", base + "/learn"]  # durable + non-standard
+    selected, _ = select_urls(homepage, links)
+    urls = [u for u, _ in selected]
+    assert base + "/about" in urls  # durable wins
+    assert base + "/learn" in urls  # fallback fills the remaining slot
+    assert urls.index(base + "/about") < urls.index(base + "/learn")
+
+
+def test_select_urls_shallow_link_fallback_skipped_when_minimum_met() -> None:
+    base = "https://acme.example"
+    homepage = base + "/"
+    # 3 durable matches already meet the minimum → no fallback selection.
+    links = [base + "/about", base + "/team", base + "/contact", base + "/learn"]
+    selected, _ = select_urls(homepage, links)
+    urls = [u for u, _ in selected]
+    assert base + "/learn" not in urls  # fallback not needed, generic link excluded
+
+
 def test_select_urls_slug_collision_recorded() -> None:
     base = "https://acme.example"
     homepage = base + "/"
@@ -770,6 +805,50 @@ def test_headless_failure_degrades_gracefully(
     assert "headless timeout" in meta["urls_attempted"][0]["error"]
 
 
+def test_js_site_subpages_fetched_headlessly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    static_html = _page("Static", extra_links="")  # link-less → triggers headless homepage render
+    rendered_home = _page("Rendered", extra_links='<a href="/contact">Contact</a>')
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher({f"{base}/": static_html}))
+    monkeypatch.setattr(
+        core_module.render,
+        "render_homepage",
+        lambda url: FetchResult(url=url, html=rendered_home, error=None, error_kind=None),
+    )
+
+    render_calls: list[str] = []
+    fetch_calls: list[str] = []
+
+    class _FakeRenderer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def render(self, url: str, **kwargs) -> FetchResult:
+            render_calls.append(url)
+            return FetchResult(url=url, html=_page("Contact"), error=None, error_kind=None)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(core_module.render, "PageRenderer", _FakeRenderer)
+
+    real_fetcher = _make_fetcher({f"{base}/": static_html})
+
+    def _tracking_fetch(url: str, *, timeout: float = 15.0) -> FetchResult:
+        fetch_calls.append(url)
+        return real_fetcher(url)
+
+    monkeypatch.setattr(core_module.fetch, "get", _tracking_fetch)
+
+    core_module.process({"name": "Acme B.V.", "website": base + "/"}, out_dir=tmp_path, write=False)
+
+    # The sub-page was fetched via the headless renderer, NOT plain HTTP.
+    assert f"{base}/contact" in render_calls
+    assert f"{base}/contact" not in fetch_calls
+
+
 def test_process_thin_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:
     base = "https://acme.example"
     pages = {f"{base}/": _page("Home", extra_links=HOMEPAGE_LINKS)}
@@ -781,6 +860,20 @@ def test_process_thin_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no
     assert meta["pages_collected"] == 1
     error_entries = [a for a in meta["urls_attempted"] if a["status"] == "error"]
     assert len(error_entries) >= 3
+
+
+def test_process_substantial_single_page_is_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    base = "https://acme.example"
+    # One page only (sub-pages 404), but its markdown is substantial (≥ MIN_SUBSTANTIAL_CONTENT_CHARS).
+    long_body = PROSE * 10  # ~2900 chars — well above the 2000 threshold
+    pages = {f"{base}/": _page("Home", body=long_body, extra_links=HOMEPAGE_LINKS)}
+    monkeypatch.setattr(core_module.fetch, "get", _make_fetcher(pages))
+    record = {"name": "Acme B.V.", "website": base + "/"}
+    meta = core_module.process(record, out_dir=tmp_path, write=True)
+    assert meta["pages_collected"] == 1
+    assert meta["status"] == "ok"  # complete-but-small site is not a failure
 
 
 def test_process_dropped_thin_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None) -> None:

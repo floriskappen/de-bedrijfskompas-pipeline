@@ -274,14 +274,17 @@ def select_urls(
 
     # Group candidates by tier. Each entry is (depth, position, link) so the
     # subsequent sort can prioritise top-level paths (depth=1) ahead of deeper
-    # sub-pages, with tier-position as a tie-breaker.
+    # sub-pages, with tier-position as a tie-breaker. Links whose path matches
+    # no durable/fresh pattern are stashed for the shallow-link fallback.
     tiered: dict[int, list[tuple[int, int, str]]] = {1: [], 2: [], 3: []}
+    fallback: list[tuple[int, str]] = []  # (depth, url) — non-tier shallow-link fallback
     seen_urls: set[str] = {homepage_url}
     for link in links:
         if link in seen_urls:
             continue
         cls = _classify(link)
         if cls is None:
+            fallback.append((_path_depth(link), link))
             continue
         tier, pos = cls
         depth = _path_depth(link)
@@ -328,6 +331,20 @@ def select_urls(
             if len(selected) >= MAX_SELECTED_URLS:
                 break
             if len(selected) >= MIN_PAGES_BEFORE_TIER_3:
+                break
+            _add(link)
+
+    # Shallow-link fallback: when durable + fresh tiers still leave fewer than
+    # the minimum, fill with the shallowest non-tiered same-domain links
+    # (path-depth-1 first, then deeper) so sites using non-standard path
+    # conventions (``/learn``, ``/knowledge``) are not silently skipped. Runs
+    # last, so a durable or fresh match is never displaced by a generic link.
+    if len(selected) < MIN_PAGES_BEFORE_TIER_3:
+        fallback.sort(key=lambda item: item[0])
+        for _depth, link in fallback:
+            if len(selected) >= MIN_PAGES_BEFORE_TIER_3:
+                break
+            if len(selected) >= MAX_SELECTED_URLS:
                 break
             _add(link)
 
